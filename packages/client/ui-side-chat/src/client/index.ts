@@ -162,17 +162,22 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
 
   useEffect(function poll(): () => void {
     let alive = true
+    let beat = 0
     const tick = async (): Promise<void> => {
       const api = apiRef.current
       if (parentRef.current === undefined && typeof props.getParent === 'function') parentRef.current = props.getParent()
       const parent = parentRef.current
-      if (api === undefined || parent === undefined) { setDbg('attesa servizi api/parent'); return }
+      if (api === undefined || parent === undefined) { setDbg('#' + ++beat + ' attesa servizi api/parent'); return }
+      // Heartbeat state: every tick reports its phase even when a call hangs,
+      // so a frozen strip means dead timers and a stuck phase names the call.
+      let phase = 'list'
+      const head = '#' + ++beat + ' ' + new Date().toLocaleTimeString() + ' '
       try {
         const listed = unwrap<{ items?: Array<{ sessionId?: string; updatedAt?: number }> }>(await api.list({}))
         const prefix = 'side-' + parent + '-'
         const children = (listed?.items ?? []).filter(s =>
           typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
-        if (children.length === 0) { setDbg('nessuna fork per ' + parent.slice(0, 14)); return }
+        if (children.length === 0) { setDbg(head + 'nessuna fork per ' + parent.slice(0, 14)); return }
         const latestRow = children
           .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : null }))
           .sort((a, b) => (a.id < b.id ? -1 : 1))[children.length - 1]!
@@ -189,6 +194,8 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         // silently freezing on it.
         if (latestRow.updatedAt === null || latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
           if (latestRow.updatedAt !== null) updatedAtRef.current = latestRow.updatedAt
+          phase = 'history'
+          setDbg(head + 'history… fork-' + latest.slice(-14, -12) + ' upd=' + (latestRow.updatedAt ?? '?'))
           const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 40 }))
           const allRows = rowsFromHistory(history)
           if (cutSeqRef.current === null) {
@@ -199,11 +206,13 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
             // A confirmed user row retires its optimistic echo.
             setEchoes(prev => prev.filter(echo => !allRows.some(row => row.role === 'user' && row.text === echo.text)))
             setRows(allRows)
-            setDbg('fork -' + latest.slice(-13, -11) + ' upd=' + (latestRow.updatedAt ?? '?') + ' righe=' + allRows.length + ' taglio=' + cutSeqRef.current)
+            setDbg(head + 'ok fork-' + latest.slice(-14, -12) + ' righe=' + allRows.length + ' taglio=' + cutSeqRef.current + ' upd=' + (latestRow.updatedAt ?? '?'))
           }
+        } else if (alive) {
+          setDbg(head + 'fermo (upd invariato)')
         }
       } catch (error) {
-        setDbg('errore: ' + (error instanceof Error ? error.message : String(error)))
+        setDbg(head + phase + ' ERRORE: ' + (error instanceof Error ? error.message : String(error)))
         /* transient wire errors: retry next tick */
       }
     }
