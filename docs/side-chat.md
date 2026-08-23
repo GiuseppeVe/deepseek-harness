@@ -11,9 +11,11 @@
    `session.*` esistente (`list`, `history`, `prompt`). Nessun dominio API
    nuovo ⇒ nessuna modifica ad apiproxy/schema/remotes generati.
 2. **La fork è una sessione normale**: creata con `agentLoop.createAgent` e
-   metadati `origin: 'subagent'` + `parentSession`; non è registrata nel
-   registro subagents, quindi NON appare nel catalogo `subagent.list` né è
-   "continuable". Tutta l'interazione passa dal lato sessioni ordinario.
+   metadati solo `cwd` + `seedLength`. Niente `origin: 'subagent'` né
+   `parentSession` nell'header: uno dei due marca l'identità come di proprietà
+   del routing subagent e l'API proxy blocca `session.prompt` con
+   `agent-busy`. Il legame col padre viaggia nel prefisso dell'id
+   (`side-<parent>-…`), che la finestra usa per il discovery.
 3. **Il boot non si blocca mai**: il client half non dichiara `inject`
    (che metterebbe il plugin in `pending` se un servizio ritarda) e legge i
    servizi solo con `ctx.get()` dentro un retry tollerante. Peggior caso: la
@@ -40,10 +42,10 @@
 ```
 /side ──▶ command-side-chat ──▶ agentLoop.createAgent(parent.ctx, {
                                    sessionId: 'side-<parent>-<n>-<ms>',
-                                   seed, meta{origin:'subagent',parentSession},
+                                   seed, meta{cwd, seedLength},
                                    setup: restrict(read,grep,glob) })
 UI (700ms): connection.api.sessions.list({}) ── filtra items con
-            parentSessionId === sessione corrente && sessionId.startsWith('side-')
+            sessionId.startsWith('side-' + sessione corrente + '-')
             ──▶ più recente = fork attiva ▶ open
 refresh:    sessions.history({sessionId: childId, maxMessages}) ──▶ righe da events[].event
 invio:      sessions.prompt({sessionId: childId, mode:'queue', content:[{type:'text',text}]})
@@ -59,14 +61,13 @@ invio:      sessions.prompt({sessionId: childId, mode:'queue', content:[{type:'t
   dal payload-direct `ctx.get('connection').api.sessions.*` — un solo
   argomento oggetto e risposta `{result:{value}}`: il namespace `remote` non
   monta `sessions`, e gli item di `session.list` espongono `sessionId`.
-- Il catalogo `subagent.list/history/prompt` è gated su
-  `ctx.subagents.listChildren` (registro dei figli creati dal servizio
-  subagent): le fork dirette non ci compaiono. Se in futuro vuoi l'invio via
-  `subagent.prompt` (affidabile anche se il parent muore), bisogna creare la
-  fork attraverso il continuation manager dei subagent — vedi "Estendere".
-- `session.prompt` su sessioni marcate subagent può rispondere
-  `agent-busy`: oggi funziona perché la fork non è nel registro; se la rendi
-  continuable, spostati su `subagent.prompt`.
+- La fence dell'ownership (`hasApiRemoteSubagentOwner` in
+  `packages/api/remotes/src/agent-lookup.ts`) rifiuta `session.prompt` con
+  `agent-busy` quando l'header porta `origin: 'subagent'`, oppure quando il
+  padre è live e possiede l'agente (`parentSession` impostato): per questo la
+  fork non scrive nessuno dei due campi. Il catalogo `subagent.*` resta
+  inutilizzabile senza il descrittore `subagent/descriptor`, che solo il
+  continuation manager appende (vedi "Estendere").
 - Il Loader risolve le entry del profilo con gli hook di tsx attivi nel
   source-launch, che applicano i `paths` del tsconfig: mappare il bare
   specifier di un pacchetto client su `src/client` esegue la faccia browser
@@ -98,7 +99,7 @@ Il browser serve `lib/client.js` dal disco: spesso basta un hard refresh
 | Boot resta su "pending (waiting for services)" | un plugin dichiara `inject` con servizi assenti | rimuovere `export const inject` (schema del client half) |
 | Boot crasha su `cannot get property "X" without inject` | lettura diretta di una proprietà del ctx fuori da `inject`, o faccia browser eseguita sul host | usare `ctx.get`; controllare che `tsconfig.base.json` mappi `<pkg>` su `src`, non su `src/client` |
 | Comando ok, finestra mai | bundle client non servito o filtri RPC disallineati dal wire | console F12 cerca `scw-` / `side-chat`; la API arriva da `ctx.get('connection').api.sessions`, gli item di `list` espongono `sessionId` |
-| Finestra aperta ma invio muto | `agent-busy` su session.prompt o parent non live | log backend; valutare fork continuable |
+| Finestra aperta ma invio muto | fork creata da una versione precedente con `origin: 'subagent'`: `session.prompt` risponde `agent-busy` | log backend; rilancia `/side` per creare una fork conforme |
 
 ### Estendere (fork continuable, stop button)
 
@@ -113,7 +114,8 @@ comparire la fork anche nel lineage UI. Costo: dipendenza dal provider
 - Plain JS/TS senza trasformazioni custom; React via `createElement`.
 - CSS inline iniettato dal componente (nessun CSS module da tipizzare).
 - Apertura visivamente pulita: il seed della main chat resta contesto interno
-  del fork; il trascritto mostra solo i messaggi prodotti dopo l'apertura.
+  del fork; il trascritto parte vuoto, senza testo di benvenuto, e mostra
+  solo i messaggi prodotti dopo l'apertura.
 - Stile a soli token `--dsw-*`, nessun colore letterale: ombre
   `--dsw-shadow-lv1/lv2`, alias bg/border/label/button/state.
 - Id sessione globalmente univoci (timestamp) per la persistenza JSONL.

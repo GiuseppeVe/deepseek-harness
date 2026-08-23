@@ -43,10 +43,14 @@ async function openSideChat(ctx: Ctx, invocation: Invocation): Promise<CommandRe
   const seed = last !== undefined && last.type === 'command/run' ? events.slice(0, -1) : events
   sideCounter += 1
   const sessionId = 'side-' + String(parent.id) + '-' + String(sideCounter) + '-' + String(Date.now())
+  // No `origin: 'subagent'` and no `parentSession` header: either marks the
+  // identity as subagent-owned and the API proxy fences `session.prompt`
+  // (agent-lookup ownership check). The parent linkage rides the session id
+  // prefix, which the browser window matches for discovery.
   sideHandle = await agentLoop.createAgent(parent.ctx, {
     sessionId,
     seed,
-    meta: { cwd: parent.session.header.cwd, parentSession: parent.id, origin: 'subagent', seedLength: seed.length },
+    meta: { cwd: parent.session.header.cwd, seedLength: seed.length },
     agentOptions: parent.options ?? {},
     setup: async (agentCtx: Ctx): Promise<void> => {
       const tools = ctx.get('tools') as { restrict(f: { allow: string[] }): () => void } | undefined

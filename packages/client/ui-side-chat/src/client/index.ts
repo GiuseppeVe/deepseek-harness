@@ -24,7 +24,6 @@ const CSS = [
   'width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px}',
   '.scw-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
   '.scw-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}',
-  '.scw-empty{margin:auto;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:center;max-width:300px}',
   '.scw-row{max-width:88%;padding:9px 13px;font-size:14px;line-height:22px;white-space:pre-wrap;word-break:break-word}',
   '.scw-user{align-self:flex-end;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-inverted);',
   'border-radius:14px 14px 4px 14px}',
@@ -126,12 +125,10 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
       const parent = parentRef.current
       if (api === undefined || parent === undefined) return
       try {
-        const listed = unwrap<{ items?: Array<{ sessionId?: string; parentSessionId?: string }> }>(await api.list({}))
+        const listed = unwrap<{ items?: Array<{ sessionId?: string }> }>(await api.list({}))
+        const prefix = 'side-' + parent + '-'
         const children = (listed?.items ?? []).filter(s =>
-          typeof s.sessionId === 'string'
-          && typeof s.parentSessionId === 'string'
-          && s.parentSessionId === parent
-          && s.sessionId.startsWith('side-'))
+          typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
         if (children.length === 0) return
         const latest = children.map(s => s.sessionId!).sort((a, b) => (a < b ? -1 : 1))[children.length - 1]!
         if (latest !== seenRef.current) {
@@ -168,9 +165,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const shown = rows.slice(baselineRef.current)
   const waiting = rows.length > 0 && rows[rows.length - 1]!.role === 'user'
   const canSend = input.trim() !== '' && seenRef.current !== ''
-  const body = shown.length === 0
-    ? createElement('div', { className: 'scw-empty' }, 'Fork della conversazione corrente con il suo contesto precaricato. Scrivi qui: la chat principale non viene modificata.')
-    : shown.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
+  const body = shown.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
   const typing = waiting ? createElement('div', { className: 'scw-typing' }, 'sta scrivendo…') : null
   return createElement('aside', { className: 'scw-panel' },
     createElement('header', { className: 'scw-head' },
