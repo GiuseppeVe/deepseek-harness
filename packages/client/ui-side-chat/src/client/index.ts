@@ -96,6 +96,10 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
+  // Four-second visible cue that the poller re-bound to a freshly created
+  // fork: with a clean open, an already-open window would otherwise show no
+  // change at all when /side runs.
+  const [announce, setAnnounce] = useState(false)
   const seenRef = useRef('')
   // Fresh-fork mark: while the newest fork has not produced its own transcript,
   // the body stays clean even though the seeded context loaded internally.
@@ -135,7 +139,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
           seenRef.current = latest
           freshRef.current = { fork: latest, done: false }
           baselineRef.current = 0
-          if (alive) setOpen(true)
+          if (alive) { setOpen(true); setAnnounce(true); window.setTimeout(() => { if (alive) setAnnounce(false) }, 4000) }
         }
         const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 200 }))
         const allRows = rowsFromHistory(history)
@@ -169,8 +173,8 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const typing = waiting ? createElement('div', { className: 'scw-typing' }, 'sta scrivendo…') : null
   return createElement('aside', { className: 'scw-panel' },
     createElement('header', { className: 'scw-head' },
-      createElement('span', { className: 'scw-dot' + (waiting ? ' scw-dot-on' : '') }),
-      createElement('span', { className: 'scw-title' }, 'Side chat'),
+      createElement('span', { className: 'scw-dot' + ((waiting || announce) ? ' scw-dot-on' : '') }),
+      createElement('span', { className: 'scw-title' }, announce ? 'Side chat \u2014 nuova fork pronta' : 'Side chat'),
       createElement('button', { className: 'scw-close', title: 'Chiudi', onClick: () => setOpen(false) }, '\u2715')),
     createElement('main', { className: 'scw-body', ref: bodyRef }, body, typing),
     createElement('footer', { className: 'scw-compose' },
