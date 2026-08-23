@@ -56,6 +56,8 @@ risposta:   i `text-delta` della coda finestra crescono in una riga provvisoria 
 "sta scrivendo": ultima riga VISIBILE è 'user'
 ```
 
+Diagnostica: la striscia sotto l'intestazione riporta per ogni tick numero progressivo, orario e fase corrente (`list`, `history…`, `fermo (upd invariato)`, `ERRORE: …`) più fork agganciata, righe ripiegate, taglio di visibilità e ultimo `updatedAt`; un tick che resta fermo su una fase indica una chiamata appesa, un contatore bloccato indica timer morti.
+
 ## Perché questi scelgi (note sui tentativi falliti)
 
 - La sessione corrente arriva dall'hook framework `useSessions` che il
