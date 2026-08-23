@@ -31,6 +31,16 @@ const CSS = [
 
 interface Row { role: 'user' | 'assistant'; text: string }
 
+/** One wire entry of session.history: the session event plus its optional tool view. */
+interface HistoryEntryWire { event?: { type?: string; data?: { content?: unknown } } }
+
+/** Payload-direct session methods of the connection's IApiClient (RpcResponse envelopes). */
+interface SessionApi {
+  list(payload: Record<string, never>): Promise<unknown>
+  history(payload: { sessionId: string; maxMessages?: number }): Promise<unknown>
+  prompt(payload: { sessionId: string; mode: 'queue'; content: Array<{ type: 'text'; text: string }> }): Promise<unknown>
+}
+
 function textOf(value: unknown): string {
   if (typeof value === 'string') return value
   if (Array.isArray(value)) {
@@ -40,38 +50,48 @@ function textOf(value: unknown): string {
 }
 
 function rowsFromHistory(result: unknown): Row[] {
-  const events = (result as { events?: unknown[] })?.events ?? (result as { value?: { events?: unknown[] } })?.value?.events
-  if (!Array.isArray(events)) return []
+  const entries = (result as { events?: HistoryEntryWire[] })?.events
+  if (!Array.isArray(entries)) return []
   const out: Row[] = []
-  for (const event of events) {
-    const e = event as { type?: string; role?: string; data?: { message?: unknown }; message?: unknown }
-    const message = e.data?.message ?? e.message
-    const text = textOf((message as { content?: unknown } | undefined)?.content ?? message)
+  for (const entry of entries) {
+    const event = entry?.event
+    const text = textOf(event?.data?.content)
     if (text === '') continue
-    if (e.type === 'user/message' || e.role === 'user') out.push({ role: 'user', text })
-    else if (e.type === 'assistant/message' || e.role === 'assistant') out.push({ role: 'assistant', text })
+    if (event?.type === 'user/message') out.push({ role: 'user', text })
+    else if (event?.type === 'assistant/message') out.push({ role: 'assistant', text })
   }
   return out
 }
 
+/** Peel an RPC response envelope ({result:{value}}) or a bare value. */
 function unwrap<T>(value: unknown): T | undefined {
-  const direct = value as { value?: unknown }
-  return (direct?.value !== undefined ? direct.value : value) as T | undefined
+  const response = value as { result?: { ok?: boolean; error?: { message?: string }; value?: unknown }; value?: unknown }
+  if (response !== null && typeof response === 'object' && response.result !== undefined) {
+    if (response.result.ok === false) throw new Error(response.result.error?.message ?? 'rpc error')
+    return response.result.value as T | undefined
+  }
+  return (response?.value !== undefined ? response.value : value) as T | undefined
 }
 
-interface Deps {
-  sessions: { current?: string }
-  remote: Record<string, Record<string, (...args: unknown[]) => Promise<unknown>>>
+/** Framework hook seat handed to every slot occupant by the renderer. */
+interface SlotProps {
+  useSessions?: (selector: (state: { current?: string }) => string | undefined) => string | undefined
 }
 
-function SideChatWindow(deps: Deps): ReturnType<typeof createElement> | null {
+function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getParent?: () => string | undefined; api?: SessionApi | undefined }): ReturnType<typeof createElement> | null {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
   const seenRef = useRef('')
   const bodyRef = useRef<HTMLDivElement | null>(null)
-  const depsRef = useRef<Deps>(deps)
-  depsRef.current = deps
+  // Refs written during render mirror the previous deps pattern: the interval
+  // closure reads the freshest values without re-subscribing.
+  const apiRef = useRef<SessionApi | undefined>(props.api)
+  apiRef.current = props.api
+  const parentRef = useRef<string | undefined>(undefined)
+  if (typeof props.useSessions === 'function') {
+    parentRef.current = props.useSessions(state => state.current)
+  }
 
   useEffect(function injectStyles(): void {
     let tag = document.getElementById('scw-styles') as HTMLStyleElement | null
@@ -82,17 +102,21 @@ function SideChatWindow(deps: Deps): ReturnType<typeof createElement> | null {
   useEffect(function poll(): () => void {
     let alive = true
     const tick = async (): Promise<void> => {
-      const { sessions, remote } = depsRef.current
-      const parent = sessions?.current
-      const sessionApi = remote?.sessions
-      if (!parent || sessionApi === undefined || typeof sessionApi.list !== 'function' || typeof sessionApi.history !== 'function') return
+      const api = apiRef.current
+      if (parentRef.current === undefined && typeof props.getParent === 'function') parentRef.current = props.getParent()
+      const parent = parentRef.current
+      if (api === undefined || parent === undefined) return
       try {
-        const listed = unwrap<{ items?: Array<{ id?: string; parentSessionId?: string }> }>(await sessionApi.list({}))
-        const children = (listed?.items ?? []).filter(s => typeof s.id === 'string' && typeof s.parentSessionId === 'string' && s.parentSessionId === parent && s.id.startsWith('side-'))
+        const listed = unwrap<{ items?: Array<{ sessionId?: string; parentSessionId?: string }> }>(await api.list({}))
+        const children = (listed?.items ?? []).filter(s =>
+          typeof s.sessionId === 'string'
+          && typeof s.parentSessionId === 'string'
+          && s.parentSessionId === parent
+          && s.sessionId.startsWith('side-'))
         if (children.length === 0) return
-        const latest = children.map(s => s.id!).sort((a, b) => (a < b ? -1 : 1))[children.length - 1]!
+        const latest = children.map(s => s.sessionId!).sort((a, b) => (a < b ? -1 : 1))[children.length - 1]!
         if (latest !== seenRef.current) { seenRef.current = latest; if (alive) setOpen(true) }
-        const history = unwrap<{ events?: unknown[] }>(await sessionApi.history(latest, { maxMessages: 80 }))
+        const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 200 }))
         if (alive) setRows(rowsFromHistory(history))
       } catch { /* transient wire errors: retry next tick */ }
     }
@@ -105,11 +129,11 @@ function SideChatWindow(deps: Deps): ReturnType<typeof createElement> | null {
 
   async function send(): Promise<void> {
     const text = input.trim()
-    const { remote } = depsRef.current
-    if (text === '' || seenRef.current === '') return
+    const api = apiRef.current
+    if (text === '' || api === undefined || seenRef.current === '') return
     setInput('')
     try {
-      await remote?.sessions?.prompt?.(seenRef.current, { mode: 'queue', content: [{ type: 'text', text }] })
+      await api.prompt({ sessionId: seenRef.current, mode: 'queue', content: [{ type: 'text', text }] })
     } catch { /* absence of a reply in the next poll surfaces the failure */ }
   }
 
@@ -142,7 +166,7 @@ interface SlotFace {
 }
 
 export function apply(ctx: unknown): void {
-  // Every service is an optional ctx.get read: a bare property access throws
+  // Every dependency is an optional ctx.get read: a bare property access throws
   // outside a declared inject, so the half stays inject-free and gives up
   // silently after the retry budget when its services never appear.
   const c = ctx as { get?: (name: string) => unknown }
@@ -154,10 +178,18 @@ export function apply(ctx: unknown): void {
     }
     slots.inject('shell.overlay', () => slots.register(
       { name: 'shell.overlay', id: 'side-chat-window', order: 100 },
-      () => createElement(SideChatWindow, {
-        sessions: (c.get?.('sessions') as Deps['sessions'] | undefined) ?? {},
-        remote: (c.get?.('remote') as Deps['remote'] | undefined) ?? {},
-      }),
+      (rawProps: unknown) => {
+        const props = rawProps as { useSessions?: SlotProps['useSessions'] }
+        const api = (c.get?.('connection') as { api?: { sessions?: SessionApi } } | undefined)?.api?.sessions
+        // Fallback for occupants rendered with bare props: the sessions service
+        // exposes its list store, whose snapshot carries the current id.
+        const sessionsService = c.get?.('sessions') as { list?: { getSnapshot?: () => { current?: string } } } | undefined
+        return createElement(SideChatWindow, {
+          useSessions: props?.useSessions,
+          getParent: () => sessionsService?.list?.getSnapshot?.().current,
+          api,
+        })
+      },
     ))
   }
   attempt(0)

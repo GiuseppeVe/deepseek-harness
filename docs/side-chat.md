@@ -42,19 +42,23 @@
                                    sessionId: 'side-<parent>-<n>-<ms>',
                                    seed, meta{origin:'subagent',parentSession},
                                    setup: restrict(read,grep,glob) })
-UI (700ms): remote.sessions.list() ── filtra items con
-            parentSessionId === sessions.current && id.startsWith('side-')
+UI (700ms): connection.api.sessions.list({}) ── filtra items con
+            parentSessionId === sessione corrente && sessionId.startsWith('side-')
             ──▶ più recente = fork attiva ▶ open
-refresh:    remote.sessions.history(childId,{maxMessages}) ──▶ righe bolle
-invio:      remote.sessions.prompt(childId,{mode:'queue',content:[text]})
+refresh:    sessions.history({sessionId: childId, maxMessages}) ──▶ righe da events[].event
+invio:      sessions.prompt({sessionId: childId, mode:'queue', content:[{type:'text',text}]})
 "sta scrivendo": ultima riga visibile è 'user'
 ```
 
 ## Perché questi scelgi (note sui tentativi falliti)
 
-- `props.useSessions` NON esiste per gli occupanti di `shell.overlay`
-  persistiti: `AppFrame` li renderizza con `{}`. I dati arrivano solo dai
-  servizi chiusi nella closure dell'apply (`ctx.sessions`, `ctx.remote`).
+- La sessione corrente arriva dall'hook framework `useSessions` che il
+  renderer passa nei props di ogni occupante di slot (`useSessions(s => s.current)`),
+  non da un servizio: il servizio sessions non ha un accessor `.current`
+  (fallback: `sessions.list.getSnapshot().current`). Le chiamate RPC partono
+  dal payload-direct `ctx.get('connection').api.sessions.*` — un solo
+  argomento oggetto e risposta `{result:{value}}`: il namespace `remote` non
+  monta `sessions`, e gli item di `session.list` espongono `sessionId`.
 - Il catalogo `subagent.list/history/prompt` è gated su
   `ctx.subagents.listChildren` (registro dei figli creati dal servizio
   subagent): le fork dirette non ci compaiono. Se in futuro vuoi l'invio via
@@ -93,7 +97,7 @@ Il browser serve `lib/client.js` dal disco: spesso basta un hard refresh
 | `/side` manca dalla palette | riga host assente o pacchetto non compilato | `base/cordis.patch.yml`, `lib/index.js` |
 | Boot resta su "pending (waiting for services)" | un plugin dichiara `inject` con servizi assenti | rimuovere `export const inject` (schema del client half) |
 | Boot crasha su `cannot get property "X" without inject` | lettura diretta di una proprietà del ctx fuori da `inject`, o faccia browser eseguita sul host | usare `ctx.get`; controllare che `tsconfig.base.json` mappi `<pkg>` su `src`, non su `src/client` |
-| Comando ok, finestra mai | bundle client non servito o `ctx.slots/remote` mancanti | console F12 cerca `scw-` / `side-chat`; verifica `dsh.client.inject` include `@deepseek-ai/dsh-api-remotes` |
+| Comando ok, finestra mai | bundle client non servito o filtri RPC disallineati dal wire | console F12 cerca `scw-` / `side-chat`; la API arriva da `ctx.get('connection').api.sessions`, gli item di `list` espongono `sessionId` |
 | Finestra aperta ma invio muto | `agent-busy` su session.prompt o parent non live | log backend; valutare fork continuable |
 
 ### Estendere (fork continuable, stop button)
