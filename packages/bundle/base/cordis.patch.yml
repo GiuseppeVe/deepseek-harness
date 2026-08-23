@@ -36,6 +36,9 @@
     - id: typert-gateway
       name: '@deepseek-ai/dsh-api-gateway'
 
+    - id: command-side-chat
+      name: '@deepseek-ai/dsh-command-side-chat'
+
     - id: session-title
       name: '@deepseek-ai/dsh-session-title'
       config:
@@ -200,6 +203,9 @@
           workspace-write:
             sandbox: workspace-write
             approval: ask
+          auto:
+            sandbox: workspace-write
+            approval: auto
           danger-full-access:
             sandbox: danger-full-access
             approval: never
