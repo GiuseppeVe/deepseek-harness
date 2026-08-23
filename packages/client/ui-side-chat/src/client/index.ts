@@ -19,6 +19,7 @@ const CSS = [
   'border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
   '.scw-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-dimmed);flex:none}',
   '.scw-dot-on{background:var(--dsw-alias-state-success-primary)}',
+  '.scw-dbg{flex:none;padding:4px 16px;font-size:11px;line-height:14px;color:var(--dsw-alias-label-caption);background:var(--dsw-alias-bg-layer-1);border-bottom:1px solid var(--dsw-alias-border-l1)}',
   '.scw-title{font-weight:600;font-size:14px;line-height:20px;flex:1;color:var(--dsw-alias-label-primary)}',
   '.scw-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;',
   'width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px}',
@@ -132,6 +133,9 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   // fork: with a clean open, an already-open window would otherwise show no
   // change at all when /side runs.
   const [announce, setAnnounce] = useState(false)
+  // One-line ground truth from the running poller: bound fork, last updatedAt,
+  // folded rows, visibility cut, or the last wire error.
+  const [dbg, setDbg] = useState('avvio…')
   const seenRef = useRef('')
   // Visibility cut: rows whose event seq is at or below the cut belong to the
   // seeded context and stay hidden. The cut is taken from the first history
@@ -162,28 +166,29 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
       const api = apiRef.current
       if (parentRef.current === undefined && typeof props.getParent === 'function') parentRef.current = props.getParent()
       const parent = parentRef.current
-      if (api === undefined || parent === undefined) return
+      if (api === undefined || parent === undefined) { setDbg('attesa servizi api/parent'); return }
       try {
         const listed = unwrap<{ items?: Array<{ sessionId?: string; updatedAt?: number }> }>(await api.list({}))
         const prefix = 'side-' + parent + '-'
         const children = (listed?.items ?? []).filter(s =>
           typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
-        if (children.length === 0) return
+        if (children.length === 0) { setDbg('nessuna fork per ' + parent.slice(0, 14)); return }
         const latestRow = children
-          .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : 0 }))
+          .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : null }))
           .sort((a, b) => (a.id < b.id ? -1 : 1))[children.length - 1]!
         const latest = latestRow.id
         if (latest !== seenRef.current) {
           seenRef.current = latest
-          updatedAtRef.current = latestRow.updatedAt
+          updatedAtRef.current = latestRow.updatedAt ?? 0
           cutSeqRef.current = null
           if (alive) { setRows([]); setOpen(true); setAnnounce(true); window.setTimeout(() => { if (alive) setAnnounce(false) }, 4000) }
         }
         // The seed replays the whole parent conversation, so a full-history
         // fetch costs megabytes: pull the tail window only when the fork log
-        // actually moved.
-        if (latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
-          updatedAtRef.current = latestRow.updatedAt
+        // actually moved. A missing updatedAt forces the refetch instead of
+        // silently freezing on it.
+        if (latestRow.updatedAt === null || latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
+          if (latestRow.updatedAt !== null) updatedAtRef.current = latestRow.updatedAt
           const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 40 }))
           const allRows = rowsFromHistory(history)
           if (cutSeqRef.current === null) {
@@ -194,9 +199,13 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
             // A confirmed user row retires its optimistic echo.
             setEchoes(prev => prev.filter(echo => !allRows.some(row => row.role === 'user' && row.text === echo.text)))
             setRows(allRows)
+            setDbg('fork -' + latest.slice(-13, -11) + ' upd=' + (latestRow.updatedAt ?? '?') + ' righe=' + allRows.length + ' taglio=' + cutSeqRef.current)
           }
         }
-      } catch { /* transient wire errors: retry next tick */ }
+      } catch (error) {
+        setDbg('errore: ' + (error instanceof Error ? error.message : String(error)))
+        /* transient wire errors: retry next tick */
+      }
     }
     const timer = window.setInterval(() => void tick(), 400)
     void tick()
@@ -234,6 +243,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
       createElement('span', { className: 'scw-dot' + ((waiting || announce) ? ' scw-dot-on' : '') }),
       createElement('span', { className: 'scw-title' }, announce ? 'Side chat \u2014 nuova fork pronta' : 'Side chat'),
       createElement('button', { className: 'scw-close', title: 'Chiudi', onClick: () => setOpen(false) }, '\u2715')),
+    createElement('div', { className: 'scw-dbg' }, 'debug: ' + dbg),
     createElement('main', { className: 'scw-body', ref: bodyRef }, body, typing),
     createElement('footer', { className: 'scw-compose' },
       createElement('div', { className: 'scw-card' },
