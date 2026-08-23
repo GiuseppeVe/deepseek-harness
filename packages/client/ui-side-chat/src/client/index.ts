@@ -43,10 +43,10 @@ const CSS = [
   '.scw-send:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-secondary);cursor:default}'
 ].join('')
 
-interface Row { role: 'user' | 'assistant'; text: string }
+interface Row { role: 'user' | 'assistant'; text: string; seq: number }
 
 /** One wire entry of session.history: the session event plus its optional tool view. */
-interface HistoryEntryWire { event?: { type?: string; data?: { content?: unknown } } }
+interface HistoryEntryWire { event?: { type?: string; seq?: number; time?: number; data?: { content?: unknown } } }
 
 /** Payload-direct session methods of the connection's IApiClient (RpcResponse envelopes). */
 interface SessionApi {
@@ -71,8 +71,9 @@ function rowsFromHistory(result: unknown): Row[] {
     const event = entry?.event
     const text = textOf(event?.data?.content)
     if (text === '') continue
-    if (event?.type === 'user/message') out.push({ role: 'user', text })
-    else if (event?.type === 'assistant/message') out.push({ role: 'assistant', text })
+    const seq = typeof event?.seq === 'number' ? event.seq : 0
+    if (event?.type === 'user/message') out.push({ role: 'user', text, seq })
+    else if (event?.type === 'assistant/message') out.push({ role: 'assistant', text, seq })
   }
   return out
 }
@@ -101,10 +102,13 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   // change at all when /side runs.
   const [announce, setAnnounce] = useState(false)
   const seenRef = useRef('')
-  // Fresh-fork mark: while the newest fork has not produced its own transcript,
-  // the body stays clean even though the seeded context loaded internally.
-  const baselineRef = useRef(0)
-  const freshRef = useRef({ fork: '', done: false })
+  // Visibility cut: rows whose event seq is at or below the cut belong to the
+  // seeded context and stay hidden. The cut is taken from the first history
+  // window fetched after binding, so the transcript starts clean regardless
+  // of how large the seed is. Position-independent: a sliding tail window
+  // cannot resurrect hidden rows.
+  const cutSeqRef = useRef<number | null>(null)
+  const updatedAtRef = useRef(0)
   const bodyRef = useRef<HTMLDivElement | null>(null)
   // Refs written during render mirror the previous deps pattern: the interval
   // closure reads the freshest values without re-subscribing.
@@ -129,25 +133,34 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
       const parent = parentRef.current
       if (api === undefined || parent === undefined) return
       try {
-        const listed = unwrap<{ items?: Array<{ sessionId?: string }> }>(await api.list({}))
+        const listed = unwrap<{ items?: Array<{ sessionId?: string; updatedAt?: number }> }>(await api.list({}))
         const prefix = 'side-' + parent + '-'
         const children = (listed?.items ?? []).filter(s =>
           typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
         if (children.length === 0) return
-        const latest = children.map(s => s.sessionId!).sort((a, b) => (a < b ? -1 : 1))[children.length - 1]!
+        const latestRow = children
+          .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : 0 }))
+          .sort((a, b) => (a.id < b.id ? -1 : 1))[children.length - 1]!
+        const latest = latestRow.id
         if (latest !== seenRef.current) {
           seenRef.current = latest
-          freshRef.current = { fork: latest, done: false }
-          baselineRef.current = 0
-          if (alive) { setOpen(true); setAnnounce(true); window.setTimeout(() => { if (alive) setAnnounce(false) }, 4000) }
+          updatedAtRef.current = latestRow.updatedAt
+          cutSeqRef.current = null
+          if (alive) { setRows([]); setOpen(true); setAnnounce(true); window.setTimeout(() => { if (alive) setAnnounce(false) }, 4000) }
         }
-        const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 200 }))
-        const allRows = rowsFromHistory(history)
-        if (freshRef.current.fork === latest && !freshRef.current.done) {
-          baselineRef.current = allRows.length
-          freshRef.current.done = true
+        // The seed replays the whole parent conversation, so a full-history
+        // fetch costs megabytes: pull the tail window only when the fork log
+        // actually moved.
+        if (latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
+          updatedAtRef.current = latestRow.updatedAt
+          const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 40 }))
+          const allRows = rowsFromHistory(history)
+          if (cutSeqRef.current === null) {
+            const last = allRows[allRows.length - 1]
+            cutSeqRef.current = last !== undefined ? last.seq : -1
+          }
+          if (alive) setRows(allRows)
         }
-        if (alive) setRows(allRows)
       } catch { /* transient wire errors: retry next tick */ }
     }
     const timer = window.setInterval(() => void tick(), 700)
@@ -166,7 +179,8 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   }
 
   if (!open) return null
-  const shown = rows.slice(baselineRef.current)
+  const cut = cutSeqRef.current ?? 0
+  const shown = rows.filter(row => row.seq > cut)
   const waiting = rows.length > 0 && rows[rows.length - 1]!.role === 'user'
   const canSend = input.trim() !== '' && seenRef.current !== ''
   const body = shown.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
