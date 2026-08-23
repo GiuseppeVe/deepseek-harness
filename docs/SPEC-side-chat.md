@@ -58,6 +58,10 @@ risposta:   i `text-delta` della coda finestra crescono in una riga provvisoria 
 
 Diagnostica: la striscia sotto l'intestazione riporta per ogni tick numero progressivo, orario e fase corrente (`list`, `history…`, `fermo (upd invariato)`, `ERRORE: …`) più fork agganciata, righe ripiegate, taglio di visibilità e ultimo `updatedAt`; un tick che resta fermo su una fase indica una chiamata appesa, un contatore bloccato indica timer morti.
 
+Connessione sempre viva: l'handle RPC si risolve con `ctx.get('connection')` a ogni chiamata (poll e invio), non una volta per render — dopo un riavvio del backend la pagina può riconnettersi con handle vecchi legati a socket morti, che appescono ogni chiamata per sempre.
+
+Turni interrotti: se la richiesta di `prompt` cade mentre è in volo, il server chiude il turno con `turn/end` di motivo `interrupted` senza alcun output; la finestra lo riconosce e mostra «Risposta interrotta dalla connessione — rinvia il messaggio» invece di lasciare la bolla utente appesa.
+
 ## Perché questi scelgi (note sui tentativi falliti)
 
 - La sessione corrente arriva dall'hook framework `useSessions` che il
