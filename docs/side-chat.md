@@ -112,5 +112,9 @@ comparire la fork anche nel lineage UI. Costo: dipendenza dal provider
 
 - Plain JS/TS senza trasformazioni custom; React via `createElement`.
 - CSS inline iniettato dal componente (nessun CSS module da tipizzare).
+- Apertura visivamente pulita: il seed della main chat resta contesto interno
+  del fork; il trascritto mostra solo i messaggi prodotti dopo l'apertura.
+- Stile a soli token `--dsw-*`, nessun colore letterale: ombre
+  `--dsw-shadow-lv1/lv2`, alias bg/border/label/button/state.
 - Id sessione globalmente univoci (timestamp) per la persistenza JSONL.
 - Ogni side effect host passa da `ctx.effect(...)` (disposable).

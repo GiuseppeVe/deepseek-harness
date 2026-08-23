@@ -2,7 +2,9 @@
  * Browser half of ui-side-chat: fixed right column mirroring the main chat,
  * bound to the newest /side forked child of the current session. Discovery,
  * transcript, and delivery ride the ordinary session RPC surface — no
- * subagent-catalog membership required.
+ * subagent-catalog membership required. Opening is visually clean: the seeded
+ * parent context stays internal until this side conversation produces its own
+ * messages. Styling consumes only --dsw-* theme tokens.
  * @module @deepseek-ai/dsh-client-ui-side-chat/client
  */
 import { createElement, useEffect, useRef, useState } from 'react'
@@ -10,23 +12,36 @@ import { createElement, useEffect, useRef, useState } from 'react'
 export const name = 'client-ui-side-chat'
 
 const CSS = [
-  '.scw-panel{position:fixed;top:0;right:0;bottom:0;width:min(480px,46vw);z-index:99999;display:flex;flex-direction:column;',
-  'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-left:1px solid var(--dsw-alias-border-l1);',
-  'box-shadow:-16px 0 40px rgba(0,0,0,.22);pointer-events:auto;font-size:14px}',
-  '.scw-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
-  '.scw-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-secondary)}',
+  '.scw-panel{position:fixed;top:0;right:0;bottom:0;width:min(420px,44vw);z-index:99999;display:flex;flex-direction:column;',
+  'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);border-left:1px solid var(--dsw-alias-border-l2);',
+  'box-shadow:var(--dsw-shadow-lv2);font-family:var(--dsw-font-family)}',
+  '.scw-head{display:flex;align-items:center;gap:10px;padding:0 12px 0 16px;height:50px;flex:none;',
+  'border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+  '.scw-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-dimmed);flex:none}',
   '.scw-dot-on{background:var(--dsw-alias-state-success-primary)}',
-  '.scw-title{font-weight:600;flex:1}',
-  '.scw-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font-size:16px;cursor:pointer;padding:4px 8px;border-radius:6px}',
-  '.scw-body{flex:1;overflow-y:auto;padding:18px 16px;display:flex;flex-direction:column;gap:10px}',
-  '.scw-empty{margin:auto;color:var(--dsw-alias-label-secondary);font-size:13px;text-align:center;max-width:280px;line-height:1.5}',
-  '.scw-user{align-self:flex-end;background:var(--dsw-alias-brand-primary);color:#fff;border-radius:14px 14px 4px 14px;padding:9px 13px;white-space:pre-wrap;word-break:break-word;max-width:86%}',
-  '.scw-assistant{align-self:flex-start;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:14px 14px 14px 4px;padding:9px 13px;white-space:pre-wrap;word-break:break-word;max-width:86%}',
-  '.scw-typing{align-self:flex-start;color:var(--dsw-alias-label-secondary);font-size:12px;padding:4px 6px}',
-  '.scw-compose{padding:12px;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
-  '.scw-card{display:flex;align-items:flex-end;gap:8px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);border-radius:14px;padding:8px 8px 8px 12px}',
-  '.scw-input{flex:1;resize:none;border:0;outline:0;background:transparent;color:inherit;font:inherit;max-height:140px;line-height:1.45}',
-  '.scw-send{border:0;border-radius:10px;background:var(--dsw-alias-brand-primary);color:#fff;width:32px;height:32px;cursor:pointer;font-size:14px}'
+  '.scw-title{font-weight:600;font-size:14px;line-height:20px;flex:1;color:var(--dsw-alias-label-primary)}',
+  '.scw-close{border:0;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;',
+  'width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px}',
+  '.scw-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
+  '.scw-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}',
+  '.scw-empty{margin:auto;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;text-align:center;max-width:300px}',
+  '.scw-row{max-width:88%;padding:9px 13px;font-size:14px;line-height:22px;white-space:pre-wrap;word-break:break-word}',
+  '.scw-user{align-self:flex-end;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-inverted);',
+  'border-radius:14px 14px 4px 14px}',
+  '.scw-assistant{align-self:flex-start;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);',
+  'color:var(--dsw-alias-label-primary);border-radius:14px 14px 14px 4px}',
+  '.scw-typing{align-self:flex-start;color:var(--dsw-alias-label-caption);font-size:12px;line-height:18px;padding:2px 4px}',
+  '.scw-compose{flex:none;padding:12px;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}',
+  '.scw-card{display:flex;align-items:flex-end;gap:8px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);',
+  'border-radius:16px;padding:7px 7px 7px 13px}',
+  '.scw-card:focus-within{border-color:var(--dsw-alias-border-l3);box-shadow:var(--dsw-shadow-lv1)}',
+  '.scw-input{flex:1;resize:none;border:0;outline:0;background:transparent;color:inherit;font-family:inherit;',
+  'font-size:14px;line-height:20px;max-height:132px;padding:5px 0}',
+  '.scw-input::placeholder{color:var(--dsw-alias-label-dimmed)}',
+  '.scw-send{border:0;border-radius:10px;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center;',
+  'font-size:13px;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-inverted)}',
+  '.scw-send:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}',
+  '.scw-send:disabled{background:var(--dsw-alias-button-primary-dimmed);color:var(--dsw-alias-label-secondary);cursor:default}'
 ].join('')
 
 interface Row { role: 'user' | 'assistant'; text: string }
@@ -83,6 +98,10 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
   const seenRef = useRef('')
+  // Fresh-fork mark: while the newest fork has not produced its own transcript,
+  // the body stays clean even though the seeded context loaded internally.
+  const baselineRef = useRef(0)
+  const freshRef = useRef({ fork: '', done: false })
   const bodyRef = useRef<HTMLDivElement | null>(null)
   // Refs written during render mirror the previous deps pattern: the interval
   // closure reads the freshest values without re-subscribing.
@@ -115,17 +134,25 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
           && s.sessionId.startsWith('side-'))
         if (children.length === 0) return
         const latest = children.map(s => s.sessionId!).sort((a, b) => (a < b ? -1 : 1))[children.length - 1]!
-        if (latest !== seenRef.current) { seenRef.current = latest; if (alive) setOpen(true) }
+        if (latest !== seenRef.current) {
+          seenRef.current = latest
+          freshRef.current = { fork: latest, done: false }
+          baselineRef.current = 0
+          if (alive) setOpen(true)
+        }
         const history = unwrap<{ events?: HistoryEntryWire[] }>(await api.history({ sessionId: latest, maxMessages: 200 }))
-        if (alive) setRows(rowsFromHistory(history))
+        const allRows = rowsFromHistory(history)
+        if (freshRef.current.fork === latest && !freshRef.current.done) {
+          baselineRef.current = allRows.length
+          freshRef.current.done = true
+        }
+        if (alive) setRows(allRows)
       } catch { /* transient wire errors: retry next tick */ }
     }
     const timer = window.setInterval(() => void tick(), 700)
     void tick()
     return function(): void { alive = false; window.clearInterval(timer) }
   }, [])
-
-  useEffect(function scroll(): void { if (bodyRef.current !== null) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [rows.length])
 
   async function send(): Promise<void> {
     const text = input.trim()
@@ -138,10 +165,12 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   }
 
   if (!open) return null
+  const shown = rows.slice(baselineRef.current)
   const waiting = rows.length > 0 && rows[rows.length - 1]!.role === 'user'
-  const body = rows.length === 0
-    ? createElement('div', { className: 'scw-empty' }, 'Fork della conversazione corrente. Scrivi qui: la chat principale non viene modificata.')
-    : rows.map((row, index) => createElement('div', { key: index, className: 'scw-' + row.role }, row.text))
+  const canSend = input.trim() !== '' && seenRef.current !== ''
+  const body = shown.length === 0
+    ? createElement('div', { className: 'scw-empty' }, 'Fork della conversazione corrente con il suo contesto precaricato. Scrivi qui: la chat principale non viene modificata.')
+    : shown.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
   const typing = waiting ? createElement('div', { className: 'scw-typing' }, 'sta scrivendo…') : null
   return createElement('aside', { className: 'scw-panel' },
     createElement('header', { className: 'scw-head' },
@@ -157,7 +186,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
           onChange: (e: { target: { value: string } }) => setInput(e.target.value),
           onKeyDown: (e: { key: string; shiftKey: boolean; preventDefault(): void }) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() } }
         }),
-        createElement('button', { className: 'scw-send', title: 'Invia', onClick: () => void send() }, '\u27a4'))))
+        createElement('button', { className: 'scw-send', title: 'Invia', disabled: !canSend, onClick: () => void send() }, '\u27a4'))))
 }
 
 interface SlotFace {
