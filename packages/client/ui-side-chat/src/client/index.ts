@@ -46,7 +46,14 @@ const CSS = [
 interface Row { role: 'user' | 'assistant'; text: string; seq: number }
 
 /** One wire entry of session.history: the session event plus its optional tool view. */
-interface HistoryEntryWire { event?: { type?: string; seq?: number; time?: number; data?: { content?: unknown } } }
+interface HistoryEntryWire {
+  event?: {
+    type?: string
+    seq?: number
+    time?: number
+    data?: { content?: unknown; message?: { content?: unknown } }
+  }
+}
 
 /** Payload-direct session methods of the connection's IApiClient (RpcResponse envelopes). */
 interface SessionApi {
@@ -82,7 +89,10 @@ function rowsFromHistory(result: unknown): Row[] {
       if (chunk !== undefined && chunk.type === 'text-delta' && typeof chunk.text === 'string') streaming += chunk.text
       continue
     }
-    const text = textOf(event?.data?.content)
+    // user/message carries the message directly; assistant/message wraps it in
+    // a `message` field beside turn/step/usage.
+    const data = event?.data
+    const text = textOf(data?.content ?? data?.message?.content)
     if (event.type === 'user/message') {
       streaming = ''
       if (text !== '') out.push({ role: 'user', text, seq })
