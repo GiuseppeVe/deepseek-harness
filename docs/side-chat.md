@@ -44,13 +44,16 @@
                                    sessionId: 'side-<parent>-<n>-<ms>',
                                    seed, meta{cwd, seedLength},
                                    setup: restrict(read,grep,glob) })
-UI (700ms): connection.api.sessions.list({}) ── filtra items con
+UI (400ms): connection.api.sessions.list({}) ── filtra items con
             sessionId.startsWith('side-' + sessione corrente + '-')
             ──▶ più recente = fork attiva ▶ open
 refresh:    solo se `list` riporta `updatedAt` cambiato: history({sessionId, maxMessages:40})
             ──▶ righe da events[].event; visibili solo quelle con seq oltre il taglio preso al bind
 invio:      sessions.prompt({sessionId: childId, mode:'queue', content:[{type:'text',text}]})
-"sta scrivendo": ultima riga visibile è 'user'
+            ──▶ eco ottimistica immediata della bolla utente (ritirata dalla riga confermata)
+risposta:   i `text-delta` della coda finestra crescono in una riga provvisoria col cursore ▍;
+            l'`assistant/message` definitivo la sostituisce
+"sta scrivendo": ultima riga VISIBILE è 'user'
 ```
 
 ## Perché questi scelgi (note sui tentativi falliti)

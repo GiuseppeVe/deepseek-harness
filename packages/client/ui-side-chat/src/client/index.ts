@@ -67,14 +67,32 @@ function rowsFromHistory(result: unknown): Row[] {
   const entries = (result as { events?: HistoryEntryWire[] })?.events
   if (!Array.isArray(entries)) return []
   const out: Row[] = []
+  // Stream-aware fold: text-delta chunks accumulate into a provisional
+  // assistant row so replies grow live like the main chat, and the final
+  // assistant/message replaces them.
+  let streaming = ''
+  let lastSeq = 0
   for (const entry of entries) {
     const event = entry?.event
+    if (event === undefined) continue
+    const seq = typeof event.seq === 'number' ? event.seq : lastSeq
+    lastSeq = seq
+    if (event.type === 'assistant/chunk') {
+      const chunk = (event.data as { chunk?: { type?: string; text?: string } } | undefined)?.chunk
+      if (chunk !== undefined && chunk.type === 'text-delta' && typeof chunk.text === 'string') streaming += chunk.text
+      continue
+    }
     const text = textOf(event?.data?.content)
-    if (text === '') continue
-    const seq = typeof event?.seq === 'number' ? event.seq : 0
-    if (event?.type === 'user/message') out.push({ role: 'user', text, seq })
-    else if (event?.type === 'assistant/message') out.push({ role: 'assistant', text, seq })
+    if (event.type === 'user/message') {
+      streaming = ''
+      if (text !== '') out.push({ role: 'user', text, seq })
+    } else if (event.type === 'assistant/message') {
+      if (text !== '') out.push({ role: 'assistant', text, seq })
+      else if (streaming !== '') out.push({ role: 'assistant', text: streaming, seq })
+      streaming = ''
+    }
   }
+  if (streaming !== '') out.push({ role: 'assistant', text: streaming + ' \u258d', seq: lastSeq })
   return out
 }
 
@@ -97,6 +115,9 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
+  // Optimistic local echo of our own sends: the bubble appears instantly and
+  // the poller's confirmed row retires it.
+  const [echoes, setEchoes] = useState<Row[]>([])
   // Four-second visible cue that the poller re-bound to a freshly created
   // fork: with a clean open, an already-open window would otherwise show no
   // change at all when /side runs.
@@ -159,31 +180,44 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
             const last = allRows[allRows.length - 1]
             cutSeqRef.current = last !== undefined ? last.seq : -1
           }
-          if (alive) setRows(allRows)
+          if (alive) {
+            // A confirmed user row retires its optimistic echo.
+            setEchoes(prev => prev.filter(echo => !allRows.some(row => row.role === 'user' && row.text === echo.text)))
+            setRows(allRows)
+          }
         }
       } catch { /* transient wire errors: retry next tick */ }
     }
-    const timer = window.setInterval(() => void tick(), 700)
+    const timer = window.setInterval(() => void tick(), 400)
     void tick()
     return function(): void { alive = false; window.clearInterval(timer) }
   }, [])
+
+  // Keep the tail in view while history rows or echoes land.
+  useEffect(function keepTail(): void {
+    if (bodyRef.current !== null) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [rows, echoes])
 
   async function send(): Promise<void> {
     const text = input.trim()
     const api = apiRef.current
     if (text === '' || api === undefined || seenRef.current === '') return
     setInput('')
+    setEchoes(prev => [...prev, { role: 'user', text, seq: Number.MAX_SAFE_INTEGER }])
     try {
       await api.prompt({ sessionId: seenRef.current, mode: 'queue', content: [{ type: 'text', text }] })
-    } catch { /* absence of a reply in the next poll surfaces the failure */ }
+    } catch {
+      setEchoes(prev => prev.filter(echo => echo.text !== text))
+      /* absence of a reply in the next poll surfaces the failure */
+    }
   }
 
   if (!open) return null
   const cut = cutSeqRef.current ?? 0
-  const shown = rows.filter(row => row.seq > cut)
-  const waiting = rows.length > 0 && rows[rows.length - 1]!.role === 'user'
+  const visible = [...rows.filter(row => row.seq > cut), ...echoes]
+  const waiting = visible.length > 0 && visible[visible.length - 1]!.role === 'user'
   const canSend = input.trim() !== '' && seenRef.current !== ''
-  const body = shown.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
+  const body = visible.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
   const typing = waiting ? createElement('div', { className: 'scw-typing' }, 'sta scrivendo…') : null
   return createElement('aside', { className: 'scw-panel' },
     createElement('header', { className: 'scw-head' },
