@@ -52,7 +52,7 @@ interface HistoryEntryWire {
     type?: string
     seq?: number
     time?: number
-    data?: { content?: unknown; message?: { content?: unknown } }
+    data?: { content?: unknown; message?: { content?: unknown }; reason?: { kind?: string } }
   }
 }
 
@@ -101,6 +101,17 @@ function rowsFromHistory(result: unknown): Row[] {
       if (text !== '') out.push({ role: 'assistant', text, seq })
       else if (streaming !== '') out.push({ role: 'assistant', text: streaming, seq })
       streaming = ''
+    } else if (event.type === 'turn/end') {
+      // A dropped connection while the prompt request was in flight makes the
+      // server end the turn as interrupted with no output at all: surface it
+      // instead of leaving the user bubble hanging forever.
+      if (data?.reason?.kind === 'interrupted') {
+        if (streaming !== '') out.push({ role: 'assistant', text: streaming, seq })
+        else if (out.length > 0 && out[out.length - 1]!.role === 'user') {
+          out.push({ role: 'assistant', text: '\u26a0\ufe0f Risposta interrotta dalla connessione \u2014 rinvia il messaggio.', seq })
+        }
+      }
+      streaming = ''
     }
   }
   if (streaming !== '') out.push({ role: 'assistant', text: streaming + ' \u258d', seq: lastSeq })
@@ -122,7 +133,7 @@ interface SlotProps {
   useSessions?: (selector: (state: { current?: string }) => string | undefined) => string | undefined
 }
 
-function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getParent?: () => string | undefined; api?: SessionApi | undefined }): ReturnType<typeof createElement> | null {
+function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getParent?: () => string | undefined; getApi?: () => SessionApi | undefined }): ReturnType<typeof createElement> | null {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
@@ -145,10 +156,8 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const cutSeqRef = useRef<number | null>(null)
   const updatedAtRef = useRef(0)
   const bodyRef = useRef<HTMLDivElement | null>(null)
-  // Refs written during render mirror the previous deps pattern: the interval
-  // closure reads the freshest values without re-subscribing.
-  const apiRef = useRef<SessionApi | undefined>(props.api)
-  apiRef.current = props.api
+  const apiRef = useRef<(() => SessionApi | undefined) | undefined>(props.getApi)
+  apiRef.current = props.getApi
   const parentRef = useRef<string | undefined>(undefined)
   if (typeof props.useSessions === 'function') {
     parentRef.current = props.useSessions(state => state.current)
@@ -164,7 +173,10 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
     let alive = true
     let beat = 0
     const tick = async (): Promise<void> => {
-      const api = apiRef.current
+      // Resolve the connection live on every cycle: after a backend restart
+      // the page can reconnect while the cached handle still points at dead
+      // sockets, which hung every call forever.
+      const api = apiRef.current?.()
       if (parentRef.current === undefined && typeof props.getParent === 'function') parentRef.current = props.getParent()
       const parent = parentRef.current
       if (api === undefined || parent === undefined) { setDbg('#' + ++beat + ' attesa servizi api/parent'); return }
@@ -228,7 +240,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
 
   async function send(): Promise<void> {
     const text = input.trim()
-    const api = apiRef.current
+    const api = apiRef.current?.()
     if (text === '' || api === undefined || seenRef.current === '') return
     setInput('')
     setEchoes(prev => [...prev, { role: 'user', text, seq: Number.MAX_SAFE_INTEGER }])
@@ -285,14 +297,13 @@ export function apply(ctx: unknown): void {
       { name: 'shell.overlay', id: 'side-chat-window', order: 100 },
       (rawProps: unknown) => {
         const props = rawProps as { useSessions?: SlotProps['useSessions'] }
-        const api = (c.get?.('connection') as { api?: { sessions?: SessionApi } } | undefined)?.api?.sessions
         // Fallback for occupants rendered with bare props: the sessions service
         // exposes its list store, whose snapshot carries the current id.
         const sessionsService = c.get?.('sessions') as { list?: { getSnapshot?: () => { current?: string } } } | undefined
         return createElement(SideChatWindow, {
           useSessions: props?.useSessions,
           getParent: () => sessionsService?.list?.getSnapshot?.().current,
-          api,
+          getApi: () => (c.get?.('connection') as { api?: { sessions?: SessionApi } } | undefined)?.api?.sessions,
         })
       },
     ))
