@@ -362,6 +362,15 @@ function nodeCompatSmokeGates(options: { cliSmoke?: boolean } = {}): Gate[] {
         env: { DSH_REQUIRE_BUILT_CLI_SMOKE: '1' },
         needs: ['build:web'],
       }),
+      pnpmExec('cli-desktop-readiness-smoke', [
+        'vitest',
+        'run',
+        'apps/cli/tests/desktop-readiness.e2e.ts',
+      ], {
+        label: 'CLI desktop readiness smoke',
+        env: { DSH_REQUIRE_BUILT_CLI_SMOKE: '1' },
+        needs: ['build:web'],
+      }),
     )
   }
   return gates

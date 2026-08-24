@@ -54,6 +54,17 @@ function withEnv<T>(name: string, value: string | undefined, action: () => T): T
   }
 }
 
+function withNodeMajor<T>(major: number, action: () => T): T {
+  const descriptor = Object.getOwnPropertyDescriptor(process.versions, 'node')
+  if (descriptor === undefined) throw new Error('process.versions.node descriptor missing')
+  Object.defineProperty(process.versions, 'node', { ...descriptor, value: `${String(major)}.19.0` })
+  try {
+    return action()
+  } finally {
+    Object.defineProperty(process.versions, 'node', descriptor)
+  }
+}
+
 describe('gate graph validation', () => {
   it.each([
     'ci-primary',
@@ -335,6 +346,26 @@ describe('Typert contract preparation', () => {
 })
 
 describe('Node compatibility graph', () => {
+  it('adds desktop readiness smoke only to Node 22 artifact graph', () => {
+    const node22 = withNodeMajor(22, () => withPnpmEntrypoint(() => gatesForMode('node-compat')))
+    const readiness = node22.find(item => item.id === 'cli-desktop-readiness-smoke')
+    expect(readiness).toMatchObject({
+      label: 'CLI desktop readiness smoke',
+      args: [
+        '/private/pnpm.cjs',
+        'exec',
+        'vitest',
+        'run',
+        'apps/cli/tests/desktop-readiness.e2e.ts',
+      ],
+      env: { DSH_REQUIRE_BUILT_CLI_SMOKE: '1' },
+      needs: ['build:web'],
+    })
+
+    const node26 = withNodeMajor(26, () => withPnpmEntrypoint(() => gatesForMode('node-compat')))
+    expect(node26.some(item => item.id === 'cli-desktop-readiness-smoke')).toBe(false)
+  })
+
   it('runs the jsdom environment smoke on every advertised Node line', () => {
     const subject = withPnpmEntrypoint(() => gatesForMode('node-compat'))
 
