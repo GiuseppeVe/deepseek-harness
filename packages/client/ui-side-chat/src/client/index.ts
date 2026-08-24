@@ -155,6 +155,15 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   // cannot resurrect hidden rows.
   const cutSeqRef = useRef<number | null>(null)
   const updatedAtRef = useRef(0)
+  // True while the last visible row is a user bubble (or an optimistic echo
+  // is pending): the list hint does not move on assistant output, so the
+  // poller must fetch through the whole reply window regardless of it.
+  const awaitingRef = useRef(false)
+  // Render-time mirrors read by the interval closure without re-subscribing.
+  const echoesRef = useRef<Row[]>([])
+  echoesRef.current = echoes
+  const openRef = useRef(open)
+  openRef.current = open
   const bodyRef = useRef<HTMLDivElement | null>(null)
   const apiRef = useRef<(() => SessionApi | undefined) | undefined>(props.getApi)
   apiRef.current = props.getApi
@@ -172,6 +181,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   useEffect(function poll(): () => void {
     let alive = true
     let beat = 0
+    let timer = 0
     const tick = async (): Promise<void> => {
       // Resolve the connection live on every cycle: after a backend restart
       // the page can reconnect while the cached handle still points at dead
@@ -190,9 +200,21 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         const children = (listed?.items ?? []).filter(s =>
           typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
         if (children.length === 0) { setDbg(head + 'nessuna fork per ' + parent.slice(0, 14)); return }
+        // Numeric fork order: the counter and creation-ms suffixes compare
+        // numerically, so fork -10 outranks -9 instead of losing to it in a
+        // string comparison.
+        const forkOrder = (id: string): [number, number] => {
+          const m = /-(\d+)-(\d+)$/.exec(id)
+          return m === null ? [-1, 0] : [Number(m[1]), Number(m[2])]
+        }
+        children.sort((a, b) => {
+          const fa = forkOrder(a.sessionId!)
+          const fb = forkOrder(b.sessionId!)
+          return fa[0] !== fb[0] ? fa[0] - fb[0] : fa[1] !== fb[1] ? fa[1] - fb[1] : (a.sessionId! < b.sessionId! ? -1 : 1)
+        })
         const latestRow = children
           .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : null }))
-          .sort((a, b) => (a.id < b.id ? -1 : 1))[children.length - 1]!
+          [children.length - 1]!
         const latest = latestRow.id
         if (latest !== seenRef.current) {
           seenRef.current = latest
@@ -202,9 +224,11 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         }
         // The seed replays the whole parent conversation, so a full-history
         // fetch costs megabytes: pull the tail window only when the fork log
-        // actually moved. A missing updatedAt forces the refetch instead of
-        // silently freezing on it.
-        if (latestRow.updatedAt === null || latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
+        // actually moved. Two overrides force the refetch anyway: a missing
+        // updatedAt (never freeze silently on it), and an awaited reply — the
+        // list hint only moves on human messages, so assistant output would
+        // otherwise stay invisible until the next send.
+        if (awaitingRef.current || latestRow.updatedAt === null || latestRow.updatedAt !== updatedAtRef.current || cutSeqRef.current === null) {
           if (latestRow.updatedAt !== null) updatedAtRef.current = latestRow.updatedAt
           phase = 'history'
           setDbg(head + 'history… fork-' + latest.slice(-14, -12) + ' upd=' + (latestRow.updatedAt ?? '?'))
@@ -214,6 +238,10 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
             const last = allRows[allRows.length - 1]
             cutSeqRef.current = last !== undefined ? last.seq : -1
           }
+          const cutNow = cutSeqRef.current ?? -1
+          const visible = allRows.filter(row => row.seq > cutNow)
+          awaitingRef.current = echoesRef.current.length > 0 ||
+            (visible[visible.length - 1]?.role === 'user')
           if (alive) {
             // A confirmed user row retires its optimistic echo.
             setEchoes(prev => prev.filter(echo => !allRows.some(row => row.role === 'user' && row.text === echo.text)))
@@ -228,9 +256,21 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         /* transient wire errors: retry next tick */
       }
     }
-    const timer = window.setInterval(() => void tick(), 400)
-    void tick()
-    return function(): void { alive = false; window.clearInterval(timer) }
+    // Self-scheduling loop: no overlapping ticks, fast while the window is
+    // open, slow while closed or the tab is hidden.
+    let busy = false
+    const schedule = (): void => {
+      if (!alive) return
+      const delay = document.visibilityState === 'hidden' ? 4000 : openRef.current ? 400 : 1600
+      timer = window.setTimeout(() => { void cycle() }, delay)
+    }
+    const cycle = async (): Promise<void> => {
+      if (busy) { schedule(); return }
+      busy = true
+      try { await tick() } finally { busy = false; schedule() }
+    }
+    schedule()
+    return function(): void { alive = false; window.clearTimeout(timer) }
   }, [])
 
   // Keep the tail in view while history rows or echoes land.
@@ -244,6 +284,7 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
     if (text === '' || api === undefined || seenRef.current === '') return
     setInput('')
     setEchoes(prev => [...prev, { role: 'user', text, seq: Number.MAX_SAFE_INTEGER }])
+    awaitingRef.current = true
     try {
       await api.prompt({ sessionId: seenRef.current, mode: 'queue', content: [{ type: 'text', text }] })
     } catch {
