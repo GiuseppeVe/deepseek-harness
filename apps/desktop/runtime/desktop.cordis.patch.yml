@@ -6,7 +6,7 @@
     host: '127.0.0.1'
     port: 3080
 
-- insert:
+- upsert:
     - id: desktop-control
       name: '@deepseek-ai/dsh-host-desktop-control'
       config:

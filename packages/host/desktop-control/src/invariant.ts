@@ -14,8 +14,8 @@ export const name = 'host-desktop-control-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: both owned route registrations use `ctx.effect()`,
- * and the real-composition test observes their removal after fiber disposal.
+ * No runtime invariant: the web server owns registered-route lifecycle, and
+ * this plugin retains no local authoritative state beyond effect-scoped registrations.
  */
 const install: InvariantInstaller = () => {}
 

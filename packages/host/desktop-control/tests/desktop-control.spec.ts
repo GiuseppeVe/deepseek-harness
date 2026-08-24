@@ -4,7 +4,9 @@
  * disposal are observed at the network boundary.
  */
 
+import { EventEmitter } from 'node:events'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -33,7 +35,7 @@ afterEach(async () => {
 })
 
 /** Boot webserver plus control routes through the real Loader. */
-async function loadComposition(withExit = true, token = CONTROL_TOKEN): Promise<Context> {
+async function loadComposition(withExit = true, token: string | null = CONTROL_TOKEN): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-desktop-control-'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -43,8 +45,10 @@ async function loadComposition(withExit = true, token = CONTROL_TOKEN): Promise<
     '    port: 0',
     '- id: desktop-control',
     "  name: '@deepseek-ai/dsh-host-desktop-control'",
-    '  config:',
-    `    token: '${token}'`,
+    ...(token === null ? [] : [
+      '  config:',
+      `    token: '${token}'`,
+    ]),
     '',
   ].join('\n'))
 
@@ -76,6 +80,16 @@ async function loadComposition(withExit = true, token = CONTROL_TOKEN): Promise<
 /** Send one route request without retaining credential-bearing response diagnostics. */
 async function request(port: number, path: string, init?: RequestInit): Promise<Response> {
   return await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
+}
+
+/** Return one Loader rejection message without serializing its configuration. */
+async function rejectionMessage(operation: Promise<unknown>): Promise<string> {
+  try {
+    await operation
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  throw new Error('expected Loader rejection')
 }
 
 describe('Desktop control routes', () => {
@@ -139,6 +153,73 @@ describe('Desktop control routes', () => {
     await expect(loadComposition(false)).rejects.toThrow('ctx.appExit')
   })
 
+  it('rejects missing control-token configuration without echoing credentials', { timeout: 60_000 }, async () => {
+    await expect(rejectionMessage(loadComposition(true, null))).resolves.toContain('token')
+  })
+
+  it('rejects a short control token without echoing credentials', { timeout: 60_000 }, async () => {
+    const token = 'x'.repeat(31)
+    const message = await rejectionMessage(loadComposition(true, token))
+    expect(message.includes(token)).toBe(false)
+  })
+
+  it('requests launcher exit after the shutdown response finishes', async () => {
+    const local = new Context()
+    const routes: Array<{ path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }> = []
+    let exited = false
+    local.provide('agents', { list: () => [] } as unknown as AgentRegistry)
+    local.provide('appExit', () => { exited = true })
+    local.provide('webServer', {
+      register(route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }) {
+        routes.push(route)
+        return () => {}
+      },
+    } as unknown as HttpServer)
+    DesktopControl.apply(local, { token: CONTROL_TOKEN })
+
+    const shutdown = routes.find(route => route.path === DesktopControl.SHUTDOWN_PATH)
+    if (shutdown === undefined) throw new Error('shutdown route did not register')
+    const response = new EventEmitter() as unknown as ServerResponse
+    response.writeHead = () => response
+    response.end = () => response
+    shutdown.handler({
+      method: 'POST',
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    } as IncomingMessage, response)
+
+    expect(exited).toBe(false)
+    response.emit('finish')
+    expect(exited).toBe(true)
+    await local.fiber.dispose()
+  })
+
+  it('contains launcher callback errors after shutdown acknowledgement', async () => {
+    const local = new Context()
+    const routes: Array<{ path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }> = []
+    local.provide('agents', { list: () => [] } as unknown as AgentRegistry)
+    local.provide('appExit', () => { throw new Error('launcher callback failed') })
+    local.provide('webServer', {
+      register(route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }) {
+        routes.push(route)
+        return () => {}
+      },
+    } as unknown as HttpServer)
+    DesktopControl.apply(local, { token: CONTROL_TOKEN })
+
+    const shutdown = routes.find(route => route.path === DesktopControl.SHUTDOWN_PATH)
+    if (shutdown === undefined) throw new Error('shutdown route did not register')
+    const response = new EventEmitter() as unknown as ServerResponse
+    response.writeHead = () => response
+    response.end = () => response
+    shutdown.handler({
+      method: 'POST',
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    } as IncomingMessage, response)
+
+    expect(() => { response.emit('finish') }).not.toThrow()
+    await local.fiber.dispose()
+  })
+
   it('removes control routes when its owning fiber disposes', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
     const port = loaded.webServer.port
@@ -146,5 +227,10 @@ describe('Desktop control routes', () => {
     if (control === undefined) throw new Error('desktop-control entry did not mount')
     await control.fiber!.dispose()
     expect((await request(port, '/__dsh/desktop/status')).status).toBe(404)
+    expect((await request(port, '/__dsh/desktop/shutdown', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    })).status).toBe(404)
+    expect(exitCodes).toEqual([])
   })
 })

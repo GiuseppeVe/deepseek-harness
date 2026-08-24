@@ -79,8 +79,14 @@ function shutdownHandler(
     return
   }
   res.writeHead(202)
+  res.once('finish', () => {
+    try {
+      exit(0)
+    } catch {
+      // Swallow appExit callback errors: response finish listeners cannot surface failures to this acknowledged request.
+    }
+  })
   res.end()
-  exit(0)
 }
 
 /**

@@ -41,3 +41,6 @@ Example `cordis.yml`:
 | `enableLogs` | Enables loader apply, reload, and unload logs. |
 
 Patches can insert entries or override fields on entries with a matching `id`.
+Root-only `upsert` rows must have distinct nonempty ids; each replaces every
+root row with that id at the first row's position, or appends when absent. An
+`upsert` patch cannot also contain `insert`.
