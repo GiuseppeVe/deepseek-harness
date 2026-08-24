@@ -16,6 +16,10 @@ Include 将根级 `upsert` 作为共享组合行为拥有。每个显式非空 i
 
 `dsh-host-desktop-control` 通过 effect 作用域内的 web-server 注册，注册带认证且有特定方法的状态与关闭路由。关闭在 `202` 响应完成后才调用启动器退出回调；该回调的错误会被容纳。
 
+`apps/desktop` 拥有一个 Electron-as-Node DSH 子进程。它将 DSH home、`.env`、会话、设置、有界日志和 PID/token lease 放在 `%LOCALAPPDATA%\DSH Desktop` 下；启动会创建此根目录，并在可变写入前应用当前用户 ACL。Electron 只会在 readiness 和已认证状态验证保留 lease token 后重新连接；每个其他 ready 监听器都是冲突。优雅关闭超时后，它只会强制终止已认证的拥有 PID 树。
+
+Electron main process 持有单实例锁，创建一个只加载回环地址的加固窗口，并在意外子进程退出后保留它。Preload 暴露冻结的状态、重启和关闭请求；每个 main-process handler 都会检查唯一窗口 sender。
+
 ## 考虑过的替代方案
 
 - **按 id 覆盖 webserver 配置** — 否决；它会保留用户选择的插件名称和重复根配置项。
@@ -24,8 +28,8 @@ Include 将根级 `upsert` 作为共享组合行为拥有。每个显式非空 i
 
 ## 后果
 
-桌面 profile 不能选择其他监听器、端口、控制插件或控制 token。其他 Include 调用方可以在最终层必须拥有一个配置项时使用根级 `upsert`；格式错误的声明会快速失败，而不会丢弃同级字段。桌面控制不拥有本地生命周期状态，dispose 会移除两个路由。
+桌面 profile 不能选择其他监听器、端口、控制插件或控制 token。其他 Include 调用方可以在最终层必须拥有一个配置项时使用根级 `upsert`；格式错误的声明会快速失败，而不会丢弃同级字段。桌面控制不拥有本地生命周期状态，dispose 会移除两个路由。Desktop 只接受 Windows 本地用户数据根目录、一个 Electron 窗口和一个 DSH 子进程；installer 暂存与此生命周期拥有方分离。
 
 ## 验证
 
-`packages/boot/app-boot/tests/config-dump.spec.ts` 固定替换、追加、仅根级以及无效 `upsert` 行为。`apps/cli/tests/desktop-control.e2e.ts` 启动并实时重组合冲突的 profile 与 home webserver/control 配置项。`packages/host/desktop-control/tests/desktop-control.spec.ts` 覆盖认证、关闭顺序、无效 token 配置以及路由 dispose。
+`packages/boot/app-boot/tests/config-dump.spec.ts` 固定替换、追加、仅根级以及无效 `upsert` 行为。`apps/cli/tests/desktop-control.e2e.ts` 启动并实时重组合冲突的 profile 与 home webserver/control 配置项。`packages/host/desktop-control/tests/desktop-control.spec.ts` 覆盖认证、关闭顺序、无效 token 配置以及路由 dispose。`apps/desktop/tests` 覆盖 LocalAppData/ACL 设置、lease 验证、精确子进程参数与环境、端口冲突、token 验证的重新连接、超时尾部日志、已认证状态、拥有树停止、sender 范围的 IPC、单实例聚焦、窗口加固、关闭选择和崩溃通知。

@@ -16,6 +16,10 @@ Include owns root `upsert` as shared composition behavior. Each explicit nonempt
 
 `dsh-host-desktop-control` registers authenticated method-specific status and shutdown routes through effect-scoped web-server registrations. Shutdown response finish occurs before it calls the launcher exit callback; callback errors are contained.
 
+`apps/desktop` owns one Electron-as-Node DSH child. It places DSH home, `.env`, sessions, settings, bounded logs, and its PID/token lease below `%LOCALAPPDATA%\DSH Desktop`; startup creates that root and applies a current-user ACL before mutable writes. Electron reattaches only after readiness and authenticated status validate the retained lease token, treats every other ready listener as a conflict, and force-terminates only an authenticated owned PID tree after graceful shutdown times out.
+
+The Electron main process holds the single-instance lock, creates one hardened loopback-only window, and keeps it open after unexpected child exit. Preload exposes frozen status, restart, and close requests; every main-process handler checks the sole window sender.
+
 ## Alternatives considered
 
 - **Id-targeted webserver config override** — rejected; it preserves user-selected plugin names and duplicate root rows.
@@ -24,8 +28,8 @@ Include owns root `upsert` as shared composition behavior. Each explicit nonempt
 
 ## Consequences
 
-Desktop profiles cannot select another listener, port, control plugin, or control token. Other Include callers can use root `upsert` where a final layer must own one entry; malformed declarations fail loud instead of discarding sibling fields. Desktop control owns no local lifecycle state, and dispose removes both routes.
+Desktop profiles cannot select another listener, port, control plugin, or control token. Other Include callers can use root `upsert` where a final layer must own one entry; malformed declarations fail loud instead of discarding sibling fields. Desktop control owns no local lifecycle state, and dispose removes both routes. Desktop accepts only a Windows local-user data root, one Electron window, and one DSH child; installer staging remains separate from this lifecycle owner.
 
 ## Verification
 
-`packages/boot/app-boot/tests/config-dump.spec.ts` pins replacement, append, root-only, and invalid `upsert` behavior. `apps/cli/tests/desktop-control.e2e.ts` boots and live-recomposes conflicting profile and home webserver/control rows. `packages/host/desktop-control/tests/desktop-control.spec.ts` covers authentication, shutdown ordering, invalid token config, and route disposal.
+`packages/boot/app-boot/tests/config-dump.spec.ts` pins replacement, append, root-only, and invalid `upsert` behavior. `apps/cli/tests/desktop-control.e2e.ts` boots and live-recomposes conflicting profile and home webserver/control rows. `packages/host/desktop-control/tests/desktop-control.spec.ts` covers authentication, shutdown ordering, invalid token config, and route disposal. `apps/desktop/tests` covers LocalAppData/ACL setup, lease validation, exact child arguments and environment, port conflict, token-validated reattach, timeout tail, authenticated status, owned-tree stop, sender-scoped IPC, single-instance focus, window hardening, close choices, and crash notification.
