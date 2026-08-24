@@ -14,7 +14,7 @@ The final Desktop patch root-`upsert`s `webserver` and `desktop-control` after e
 
 Include owns root `upsert` as shared composition behavior. Each explicit nonempty id replaces every matching root row at the first matching position or appends when absent; the rebuilt id index applies later patches to canonical rows. `upsert` rejects a nested target, duplicate or empty ids, and every sibling entry operation before Include reconciles its child tree.
 
-`dsh-host-desktop-control` registers authenticated method-specific status and shutdown routes through effect-scoped web-server registrations. Shutdown finishes its `202` response before containing the launcher exit callback.
+`dsh-host-desktop-control` registers authenticated method-specific status and shutdown routes through effect-scoped web-server registrations. Shutdown response finish occurs before it calls the launcher exit callback; callback errors are contained.
 
 ## Alternatives considered
 

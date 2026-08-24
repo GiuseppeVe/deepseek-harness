@@ -14,7 +14,7 @@ Status: implemented
 
 Include 将根级 `upsert` 作为共享组合行为拥有。每个显式非空 id 都会在第一个匹配位置替换所有同 id 根配置项；没有匹配时追加。重建的 id 索引会让后续 patch 应用于规范配置项。`upsert` 会在 Include 协调其子树之前拒绝嵌套目标、重复或空 id，以及任何同级配置项操作。
 
-`dsh-host-desktop-control` 通过 effect 作用域内的 web-server 注册，注册带认证且有特定方法的状态与关闭路由。关闭在完成 `202` 响应后才调用并容纳启动器退出回调。
+`dsh-host-desktop-control` 通过 effect 作用域内的 web-server 注册，注册带认证且有特定方法的状态与关闭路由。关闭在 `202` 响应完成后才调用启动器退出回调；该回调的错误会被容纳。
 
 ## 考虑过的替代方案
 
