@@ -44,10 +44,14 @@
                                    sessionId: 'side-<parent>-<n>-<ms>',
                                    seed, meta{cwd, seedLength},
                                    setup: restrict(read,grep,glob) })
-UI (400ms): connection.api.sessions.list({}) ── filtra items con
-            sessionId.startsWith('side-' + sessione corrente + '-')
-            ──▶ più recente = fork attiva ▶ open
-refresh:    solo se `list` riporta `updatedAt` cambiato: history({sessionId, maxMessages:40})
+UI: ciclo auto-pianificato senza sovrapposizioni — 400 ms a pannello aperto,
+    1,6 s chiuso, sospeso a scheda nascosta; filtra items con
+    sessionId.startsWith('side-' + sessione corrente + '-'); scelta della
+    fork per suffisso `-<n>-<ms>` ordinato numericamente
+refresh: solo se `list` riporta `updatedAt` cambiato OPPURE mentre è attesa
+         una risposta (ultima riga visibile 'user' o eco pendente: l'hint si
+         muove solo sui messaggi umani, mai sull'output assistant):
+         history({sessionId, maxMessages:40})
             ──▶ righe da events[].event; visibili solo quelle con seq oltre il taglio preso al bind
 invio:      sessions.prompt({sessionId: childId, mode:'queue', content:[{type:'text',text}]})
             ──▶ eco ottimistica immediata della bolla utente (ritirata dalla riga confermata)
@@ -62,8 +66,17 @@ Connessione sempre viva: l'handle RPC si risolve con `ctx.get('connection')` a o
 
 Turni interrotti: se la richiesta di `prompt` cade mentre è in volo, il server chiude il turno con `turn/end` di motivo `interrupted` senza alcun output; la finestra lo riconosce e mostra «Risposta interrotta dalla connessione — rinvia il messaggio» invece di lasciare la bolla utente appesa.
 
+Isolamento tool: `restrict({allow:['read','grep','glob']})` gira sulla vista scoped `agentCtx.tools` — l'istanza globale del servizio lancia «requires a scoped context» — e fallisce loud: un setup che non riesce a limitare i tool deve rompere il comando, non regalare al fork tutti i tool del genitore. Un secondo `/side` sullo stesso parent mentre la creazione è in corso restituisce errore invece di orfanare un handle.
+
 ## Perché questi scelgi (note sui tentativi falliti)
 
+- Il taglio preso al bind è voluto: la richiesta esplicita è «appena aperta
+  la side chat deve essere pulita», quindi anche le conversazioni side
+  precedenti di una fork riaperta restano nascoste; il limite di 40 unità
+  per pagina è l'attesa di coda, non un archivio consultabile.
+- Il tasto Chiudi nasconde solo il pannello: la fork resta viva e il suo
+  agente continua a esistere finché un nuovo `/side` non ricrea il handle o
+  il backend non termina. La chiusura non dispone nulla per scelta.
 - La sessione corrente arriva dall'hook framework `useSessions` che il
   renderer passa nei props di ogni occupante di slot (`useSessions(s => s.current)`),
   non da un servizio: il servizio sessions non ha un accessor `.current`
