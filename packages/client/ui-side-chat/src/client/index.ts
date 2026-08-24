@@ -133,7 +133,17 @@ interface SlotProps {
   useSessions?: (selector: (state: { current?: string }) => string | undefined) => string | undefined
 }
 
-function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getParent?: () => string | undefined; getApi?: () => SessionApi | undefined }): ReturnType<typeof createElement> | null {
+/** Fork ids closed in this browser: never rebound by discovery again. */
+const ignoredForks = new Set<string>()
+try {
+  for (const id of JSON.parse(window.sessionStorage.getItem('scw-ignored') ?? '[]') as string[]) ignoredForks.add(id)
+} catch { /* absent or malformed marker: start clean */ }
+function rememberIgnored(id: string): void {
+  ignoredForks.add(id)
+  try { window.sessionStorage.setItem('scw-ignored', JSON.stringify([...ignoredForks])) } catch { /* storage full or blocked: memory-only */ }
+}
+
+function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getParent?: () => string | undefined; getApi?: () => SessionApi | undefined; execCommand?: (line: string) => Promise<unknown> }): ReturnType<typeof createElement> | null {
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [input, setInput] = useState('')
@@ -200,6 +210,8 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         const children = (listed?.items ?? []).filter(s =>
           typeof s.sessionId === 'string' && s.sessionId.startsWith(prefix))
         if (children.length === 0) { setDbg(head + 'nessuna fork per ' + parent.slice(0, 14)); return }
+        const open = children.filter(s => !ignoredForks.has(s.sessionId!))
+        if (open.length === 0) { setDbg(head + 'solo fork chiuse'); return }
         // Numeric fork order: the counter and creation-ms suffixes compare
         // numerically, so fork -10 outranks -9 instead of losing to it in a
         // string comparison.
@@ -207,14 +219,14 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
           const m = /-(\d+)-(\d+)$/.exec(id)
           return m === null ? [-1, 0] : [Number(m[1]), Number(m[2])]
         }
-        children.sort((a, b) => {
+        open.sort((a, b) => {
           const fa = forkOrder(a.sessionId!)
           const fb = forkOrder(b.sessionId!)
           return fa[0] !== fb[0] ? fa[0] - fb[0] : fa[1] !== fb[1] ? fa[1] - fb[1] : (a.sessionId! < b.sessionId! ? -1 : 1)
         })
-        const latestRow = children
+        const latestRow = open
           .map(s => ({ id: s.sessionId!, updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : null }))
-          [children.length - 1]!
+          [open.length - 1]!
         const latest = latestRow.id
         if (latest !== seenRef.current) {
           seenRef.current = latest
@@ -256,12 +268,15 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
         /* transient wire errors: retry next tick */
       }
     }
-    // Self-scheduling loop: no overlapping ticks, fast while the window is
-    // open, slow while closed or the tab is hidden.
+    // Self-scheduling loop: no overlapping ticks. Fast while a reply is
+    // awaited, relaxed when idle, slower closed, paused on hidden tabs —
+    // every history page is large, so the idle rates protect the backend.
     let busy = false
     const schedule = (): void => {
       if (!alive) return
-      const delay = document.visibilityState === 'hidden' ? 4000 : openRef.current ? 400 : 1600
+      const delay = document.visibilityState === 'hidden' ? 8000
+        : openRef.current ? (awaitingRef.current ? 800 : 2500)
+        : 6000
       timer = window.setTimeout(() => { void cycle() }, delay)
     }
     const cycle = async (): Promise<void> => {
@@ -298,13 +313,28 @@ function SideChatWindow(props: { useSessions?: SlotProps['useSessions']; getPare
   const visible = [...rows.filter(row => row.seq > cut), ...echoes]
   const waiting = visible.length > 0 && visible[visible.length - 1]!.role === 'user'
   const canSend = input.trim() !== '' && seenRef.current !== ''
+  // Closing the panel ends the fork's life: dispose the side agent through
+  // /side-close and forget the fork in this browser, so discovery never
+  // rebinds to it. The next /side creates a fresh one.
+  function closePanel(): void {
+    const fork = seenRef.current
+    if (fork !== '') rememberIgnored(fork)
+    if (fork !== '' && typeof props.execCommand === 'function') void props.execCommand('/side-close').catch(() => { /* already gone */ })
+    seenRef.current = ''
+    cutSeqRef.current = null
+    awaitingRef.current = false
+    setRows([])
+    setEchoes([])
+    setOpen(false)
+  }
+
   const body = visible.map((row, index) => createElement('div', { key: index, className: 'scw-row scw-' + row.role }, row.text))
   const typing = waiting ? createElement('div', { className: 'scw-typing' }, 'sta scrivendo…') : null
   return createElement('aside', { className: 'scw-panel' },
     createElement('header', { className: 'scw-head' },
       createElement('span', { className: 'scw-dot' + ((waiting || announce) ? ' scw-dot-on' : '') }),
       createElement('span', { className: 'scw-title' }, announce ? 'Side chat \u2014 nuova fork pronta' : 'Side chat'),
-      createElement('button', { className: 'scw-close', title: 'Chiudi', onClick: () => setOpen(false) }, '\u2715')),
+      createElement('button', { className: 'scw-close', title: 'Chiudi ed elimina la fork', onClick: closePanel }, '\u2715')),
     createElement('div', { className: 'scw-dbg' }, 'debug: ' + dbg),
     createElement('main', { className: 'scw-body', ref: bodyRef }, body, typing),
     createElement('footer', { className: 'scw-compose' },
@@ -345,6 +375,12 @@ export function apply(ctx: unknown): void {
           useSessions: props?.useSessions,
           getParent: () => sessionsService?.list?.getSnapshot?.().current,
           getApi: () => (c.get?.('connection') as { api?: { sessions?: SessionApi } } | undefined)?.api?.sessions,
+          execCommand: (line: string) => {
+            const parent = sessionsService?.list?.getSnapshot?.().current
+            const commands = (c.get?.('connection') as { api?: { commands?: { execute(args: { agentId?: string; line: string; images: unknown[] }): Promise<unknown> } } } | undefined)?.api?.commands
+            if (commands === undefined || parent === undefined) return Promise.resolve(undefined)
+            return commands.execute({ agentId: parent, line, images: [] })
+          },
         })
       },
     ))

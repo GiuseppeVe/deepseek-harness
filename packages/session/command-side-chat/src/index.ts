@@ -1,13 +1,15 @@
 /**
- * Persistent /side human command: forks an independent side agent seeded with
- * the invoking conversation, restricts its tools to a minimal read-only set
- * (best effort). @module @deepseek-ai/dsh-command-side-chat
+ * Ephemeral /side human command: forks a temporary side agent seeded with the
+ * invoking conversation. The fork inherits the parent capabilities unchanged —
+ * it is an ordinary chat with the same workspace-write permission surface —
+ * and `/side-close` disposes it when the side panel closes.
+ * @module @deepseek-ai/dsh-command-side-chat
  */
 
 export const name = 'command-side-chat'
 export const inject = ['commands', 'agentLoop']
 
-interface Ctx { get(name: string): unknown; effect(fn: () => unknown, label: string): unknown; tools?: { restrict(f: { allow: string[] }): () => void } | undefined }
+interface Ctx { get(name: string): unknown; effect(fn: () => unknown, label: string): unknown }
 interface AnyMessage { content?: Array<{ type?: string; text?: string }> }
 interface SideEvent { type?: string; data?: { message?: AnyMessage } }
 interface SideSession { header: { id?: string; cwd?: string }; events: readonly SideEvent[]; firstLiveSeq?: number }
@@ -32,9 +34,13 @@ let sideCounter = 0
  * first `createAgent` awaits would orphan one handle forever. */
 const sideCreating = new Set<string>()
 
+function ownerKeyOf(invocation: Invocation): string {
+  return invocation.agent.session.header.id ?? invocation.agent.id
+}
+
 async function openSideChat(ctx: Ctx, sideHandles: Map<string, SideHandle>, invocation: Invocation): Promise<CommandResult> {
   const parent = invocation.agent
-  const ownerKey = parent.session.header.id ?? parent.id
+  const ownerKey = ownerKeyOf(invocation)
   if (sideCreating.has(ownerKey)) return { kind: 'error', text: 'Creazione della side chat già in corso.' }
   sideCreating.add(ownerKey)
   try {
@@ -53,26 +59,28 @@ async function openSideChat(ctx: Ctx, sideHandles: Map<string, SideHandle>, invo
     // No `origin: 'subagent'` and no `parentSession` header: either marks the
     // identity as subagent-owned and the API proxy fences `session.prompt`
     // (agent-lookup ownership check). The parent linkage rides the session id
-    // prefix, which the browser window matches for discovery.
+    // prefix, which the browser window matches for discovery. No setup hooks:
+    // the fork is an ordinary chat inheriting the parent preset, permissions
+    // included (workspace write).
     const handle = await agentLoop.createAgent(parent.ctx, {
       sessionId,
       seed,
       meta: { cwd: parent.session.header.cwd, seedLength: seed.length },
       agentOptions: parent.options ?? {},
-      setup: async (agentCtx: Ctx): Promise<void> => {
-        // restrict() exists only on the agent-scoped tools view; the global
-        // service instance throws. Failing loud beats a side chat that keeps
-        // every parent tool silently.
-        const tools = (agentCtx as Ctx).tools
-        if (tools === undefined) throw new Error('side chat: agent context exposes no scoped tools service')
-        agentCtx.effect(() => tools.restrict({ allow: ['read', 'grep', 'glob'] }), 'side-minimal-tools')
-      },
     })
     sideHandles.set(ownerKey, handle)
     return { kind: 'success', text: 'Side chat aperta a destra.' }
   } finally {
     sideCreating.delete(ownerKey)
   }
+}
+
+function closeSideChat(sideHandles: Map<string, SideHandle>, invocation: Invocation): CommandResult {
+  const handle = sideHandles.get(ownerKeyOf(invocation))
+  if (handle === undefined) return { kind: 'error', text: 'Nessuna side chat aperta.' }
+  sideHandles.delete(ownerKeyOf(invocation))
+  void handle.dispose().catch(() => { /* fork already gone */ })
+  return { kind: 'success', text: 'Side chat chiusa.' }
 }
 
 export function apply(ctx: Ctx): void {
@@ -84,9 +92,15 @@ export function apply(ctx: Ctx): void {
       try { await handle.dispose() } catch { /* fork already gone */ }
     }))
   }, 'command-side-chat: dispose side chats')
-  ctx.effect(() => (ctx.get('commands') as unknown as { register(d: unknown): () => void }).register({
+  const commands = ctx.get('commands') as unknown as { register(d: unknown): () => void }
+  ctx.effect(() => commands.register({
     name: 'side',
     description: 'Open an independent side chat forked from the current conversation.',
     handler: async (invocation: Invocation) => openSideChat(ctx, sideHandles, invocation),
   }), 'command-side-chat: /side')
+  ctx.effect(() => commands.register({
+    name: 'side-close',
+    description: 'Close and dispose the side chat fork of the current conversation.',
+    handler: async (invocation: Invocation) => closeSideChat(sideHandles, invocation),
+  }), 'command-side-chat: /side-close')
 }
