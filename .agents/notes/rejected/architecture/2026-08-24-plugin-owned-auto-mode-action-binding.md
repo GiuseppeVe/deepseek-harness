@@ -1,8 +1,10 @@
 # Agent Note: Plugin-owned action binding for resilient auto mode
 
-Status: proposed
+Status: rejected — superseded by the zero-trust Guardian proposal; same-process plugin trust cannot contain third-party code
 
 English | [中文](2026-08-24-plugin-owned-auto-mode-action-binding.zh.md)
+
+[Zero-trust Guardian and plugin-owned action binding](../../proposed/architecture/2026-08-24-plugin-owned-auto-mode-action-binding-v2.md) supersedes this proposal. This record remains because allowing an ordinary same-process plugin to police third-party plugins is a recurring unsafe shortcut.
 
 ## Problem
 

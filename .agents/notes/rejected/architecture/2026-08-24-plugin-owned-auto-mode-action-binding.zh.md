@@ -1,8 +1,10 @@
 # Agent Note: 弹性 auto mode 的插件自有 action binding
 
-Status: proposed
+Status: rejected — 零信任 Guardian 提案已取代本提案；同进程插件信任无法约束第三方代码
 
 [English](2026-08-24-plugin-owned-auto-mode-action-binding.md) | 中文
+
+[零信任 Guardian 与插件自有 action binding](../../proposed/architecture/2026-08-24-plugin-owned-auto-mode-action-binding-v2.zh.md)取代本提案。保留此记录，是因为让普通同进程插件监管第三方插件是一种会反复出现的不安全捷径。
 
 ## 问题
 
