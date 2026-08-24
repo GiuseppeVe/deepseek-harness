@@ -1,20 +1,22 @@
 # Side chat (`/side`) — specifica di manutenzione
 
 > Feature persistente che aggiunge il comando `/side`: apre una finestra di
-> chat speculare sul lato destro della UI web, fork effimera della
-> conversazione corrente con set di tool minimo. Ispirata alla side chat di
-> Codex app.
+> chat speculare sul lato destro della UI web, fork temporanea della
+> conversazione corrente. Ispirata alla side chat di Codex app.
 
 ## Filosofia
 
 1. **Zero nuove RPC**: la feature riusa esclusivamente la superficie
-   `session.*` esistente (`list`, `history`, `prompt`). Nessun dominio API
-   nuovo ⇒ nessuna modifica ad apiproxy/schema/remotes generati.
-2. **La fork è una sessione normale**: creata con `agentLoop.createAgent` e
-   metadati solo `cwd` + `seedLength`. Niente `origin: 'subagent'` né
-   `parentSession` nell'header: uno dei due marca l'identità come di proprietà
-   del routing subagent e l'API proxy blocca `session.prompt` con
-   `agent-busy`. Il legame col padre viaggia nel prefisso dell'id
+   `session.*` esistente (`list`, `history`, `prompt`) più il comando
+   `/side-close` per lo smaltimento. Nessun dominio API nuovo.
+2. **Fork temporanea della main chat**: eredita il contesto (seed completo),
+   graficamente nasce vuota, e poi è una chat normale con le stesse
+   capacità del genitore — nessuna restrizione di tool, stessa superficie di
+   permessi (workspace write). È una sessione ordinaria creata con
+   `agentLoop.createAgent` e metadati solo `cwd` + `seedLength`. Niente
+   `origin: 'subagent'` né `parentSession`: uno dei due marca l'identità come
+   di proprietà del routing subagent e l'API proxy blocca `session.prompt`
+   con `agent-busy`. Il legame col padre viaggia nel prefisso dell'id
    (`side-<parent>-…`), che la finestra usa per il discovery.
 3. **Il boot non si blocca mai**: il client half non dichiara `inject`
    (che metterebbe il plugin in `pending` se un servizio ritarda) e legge i
@@ -22,16 +24,19 @@
    finestra non c'è, il boot procede.
 4. **Comando come unico trigger**: niente launcher grafici; `/side` crea la
    fork, la finestra compare da sola quando scopre la fork più recente.
-5. **Effimerma**: ogni `/side` dispose la fork precedente; gli id contengono
-   timestamp (`side-<parent>-<n>-<ms>`) così sono univoci per sempre
-   (la persistenza JSONL collide altrimenti dopo un riavvio).
+5. **Effimera con ciclo di vita esplicito**: ogni `/side` dispose la fork
+   precedente; chiudere il pannello esegue `/side-close`, che dispone
+   l'agente, e il browser dimentica l'id così il discovery non si riaggancia
+   mai sulla fork chiusa. Gli id portano timestamp
+   (`side-<parent>-<n>-<ms>`) quindi sono univoci per sempre (la
+   persistenza JSONL collide altrimenti dopo un riavvio).
 
 ## Componenti
 
 | Percorso | Ruolo |
 |---|---|
-| `packages/session/command-side-chat/src/index.ts` | Host: registra `/side`, fora l'agente (seed = eventi del parent meno l'ultimo `command/run`), tool minimi `read/grep/glob` via `tools.restrict` in try/catch |
-| `packages/client/ui-side-chat/src/client/index.ts` | Client: occupante `shell.overlay` (finestra fissa destra), polling 700 ms |
+| `packages/session/command-side-chat/src/index.ts` | Host: registra `/side` (crea il fork, seed = eventi del parent meno l'ultimo `command/run`) e `/side-close` (dispose del handle); nessuna restrizione tool |
+| `packages/client/ui-side-chat/src/client/index.ts` | Client: occupante `shell.overlay` (finestra fissa destra), ciclo auto-pianificato adattivo |
 | `packages/bundle/base/cordis.patch.yml` | riga host `- id: command-side-chat` |
 | `packages/bundle/web-app/cordis.patch.yml` | riga client `- id: ui-side-chat` |
 | `tsconfig.host.json` / `tsconfig.client.json` / `tsconfig.base.json` | riferimenti progetto + paths |
@@ -42,12 +47,13 @@
 ```
 /side ──▶ command-side-chat ──▶ agentLoop.createAgent(parent.ctx, {
                                    sessionId: 'side-<parent>-<n>-<ms>',
-                                   seed, meta{cwd, seedLength},
-                                   setup: restrict(read,grep,glob) })
-UI: ciclo auto-pianificato senza sovrapposizioni — 400 ms a pannello aperto,
-    1,6 s chiuso, sospeso a scheda nascosta; filtra items con
-    sessionId.startsWith('side-' + sessione corrente + '-'); scelta della
-    fork per suffisso `-<n>-<ms>` ordinato numericamente
+                                   seed, meta{cwd, seedLength} })
+chiudi ─▶ /side-close: dispose del handle; il browser dimentica l'id
+UI: ciclo auto-pianificato senza sovrapposizioni — 800 ms mentre è attesa
+    una risposta, 2,5 s a pannello aperto, 6 s chiuso, sospeso a scheda
+    nascosta; filtra items con sessionId.startsWith('side-' + sessione
+    corrente + '-') escludendo gli id chiusi; scelta della fork per
+    suffisso `-<n>-<ms>` ordinato numericamente
 refresh: solo se `list` riporta `updatedAt` cambiato OPPURE mentre è attesa
          una risposta (ultima riga visibile 'user' o eco pendente: l'hint si
          muove solo sui messaggi umani, mai sull'output assistant):
@@ -66,7 +72,7 @@ Connessione sempre viva: l'handle RPC si risolve con `ctx.get('connection')` a o
 
 Turni interrotti: se la richiesta di `prompt` cade mentre è in volo, il server chiude il turno con `turn/end` di motivo `interrupted` senza alcun output; la finestra lo riconosce e mostra «Risposta interrotta dalla connessione — rinvia il messaggio» invece di lasciare la bolla utente appesa.
 
-Isolamento tool: `restrict({allow:['read','grep','glob']})` gira sulla vista scoped `agentCtx.tools` — l'istanza globale del servizio lancia «requires a scoped context» — e fallisce loud: un setup che non riesce a limitare i tool deve rompere il comando, non regalare al fork tutti i tool del genitore. Un secondo `/side` sullo stesso parent mentre la creazione è in corso restituisce errore invece di orfanare un handle.
+Ciclo di vita: la chiusura del pannello esegue `/side-close`, che dispone l'agente della fork; il log JSONL resta su disco ma è orfano e innocuo, e il browser non lo riseleziona mai. Un secondo `/side` sullo stesso parent mentre la creazione è in corso restituisce errore invece di orfanare un handle.
 
 ## Perché questi scelgi (note sui tentativi falliti)
 
@@ -74,9 +80,11 @@ Isolamento tool: `restrict({allow:['read','grep','glob']})` gira sulla vista sco
   la side chat deve essere pulita», quindi anche le conversazioni side
   precedenti di una fork riaperta restano nascoste; il limite di 40 unità
   per pagina è l'attesa di coda, non un archivio consultabile.
-- Il tasto Chiudi nasconde solo il pannello: la fork resta viva e il suo
-  agente continua a esistere finché un nuovo `/side` non ricrea il handle o
-  il backend non termina. La chiusura non dispone nulla per scelta.
+- Nessuna restrizione di tool è voluta: la direzione è «una chat normale
+  con permesso workspace write», quindi il fork eredita il preset del
+  genitore intatto. Un tentativo con `tools.restrict` su contesto globale
+  lanciava e veniva ingoiato, lasciando il fork con tutti i tool e senza
+  segnalazione: rimosso del tutto.
 - La sessione corrente arriva dall'hook framework `useSessions` che il
   renderer passa nei props di ogni occupante di slot (`useSessions(s => s.current)`),
   non da un servizio: il servizio sessions non ha un accessor `.current`
