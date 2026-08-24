@@ -196,7 +196,7 @@ describe('renderConfigDump', () => {
     ])
   })
 
-  it('rejects malformed or mixed upserts before rendering', () => {
+  it('rejects malformed, mixed, or sibling-operation upserts before rendering', () => {
     const dir = tmp()
     const base = writeBase(dir)
     expect(() => renderConfigDump(NAME, base, [{
@@ -214,6 +214,13 @@ describe('renderConfigDump', () => {
       label: 'nested.yml',
       patches: [{ id: 'group', upsert: [{ id: 'canonical', name: './noop.mjs' }] }],
     }], () => {})).toThrow('patch upsert is root-only')
+    expect(() => renderConfigDump(NAME, base, [{
+      label: 'sibling.yml',
+      patches: [{
+        upsert: [{ id: 'canonical', name: './noop.mjs' }],
+        config: { ignored: true },
+      }],
+    }], () => {})).toThrow('patch upsert cannot contain config')
   })
 
   it('defaults its warn sink to one stderr line per skipped patch', () => {

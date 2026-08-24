@@ -13,6 +13,7 @@ import * as DesktopControl from '@deepseek-ai/dsh-host-desktop-control/src/index
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 const DESKTOP_PATCH = join(REPO_ROOT, 'apps/desktop/runtime/desktop.cordis.patch.yml')
 const CONTROL_MODULE = '@deepseek-ai/dsh-host-desktop-control'
+const WEB_SERVER_MODULE = '@deepseek-ai/dsh-host-webserver'
 const CONTROL_TOKEN = 'dsh-desktop-overlay-test-token-1a9e86c7b4f2'
 
 let root: string | undefined
@@ -31,11 +32,12 @@ afterEach(async () => {
 /** Write one user patch layer that tries to replace Desktop's listener and control entry. */
 async function writeProfilePatch(path: string, port: number): Promise<void> {
   await writeFile(path, [
-    '- id: webserver',
-    '  config:',
-    "    host: '0.0.0.0'",
-    `    port: ${String(port)}`,
     '- insert:',
+    '    - id: webserver',
+    '      name: ./profile-webserver.mjs',
+    '      config:',
+    "        host: '0.0.0.0'",
+    `        port: ${String(port)}`,
     '    - id: desktop-control',
     '      name: ./user-control.mjs',
     '      config:',
@@ -47,10 +49,12 @@ async function writeProfilePatch(path: string, port: number): Promise<void> {
 /** Write the home layer, which normally outranks the profile layer. */
 async function writeHomePatch(path: string, port: number): Promise<void> {
   await writeFile(path, [
-    '- id: webserver',
-    '  config:',
-    "    host: '0.0.0.0'",
-    `    port: ${String(port)}`,
+    '- insert:',
+    '    - id: webserver',
+    '      name: ./home-webserver.mjs',
+    '      config:',
+    "        host: '0.0.0.0'",
+    `        port: ${String(port)}`,
     '- insert:',
     '    - id: desktop-control',
     '      name: ./home-control.mjs',
@@ -85,6 +89,7 @@ function rows(ctx: Context, id: string) {
 function expectDesktopAuthority(ctx: Context, appliedTokens: readonly string[]): void {
   const webserver = rows(ctx, 'webserver')
   expect(webserver).toHaveLength(1)
+  expect(webserver[0]?.options.name === WEB_SERVER_MODULE).toBe(true)
   const config = webserver[0]?.options.config as { host?: unknown; port?: unknown }
   expect(config.host === '127.0.0.1').toBe(true)
   expect(config.port === 3080).toBe(true)
@@ -105,6 +110,8 @@ describe('Desktop final overlay', () => {
     const homePatch = join(root, 'home.cordis.patch.yml')
     await writeFile(rootConfig, '[]\n')
     await writeFile(join(root, 'webserver.mjs'), 'export const name = "webserver-fixture"\nexport function apply() {}\n')
+    await writeFile(join(root, 'profile-webserver.mjs'), 'export const name = "profile-webserver-fixture"\nexport function apply() {}\n')
+    await writeFile(join(root, 'home-webserver.mjs'), 'export const name = "home-webserver-fixture"\nexport function apply() {}\n')
     await writeFile(join(root, 'user-control.mjs'), 'export const name = "user-control-fixture"\nexport function apply() {}\n')
     await writeFile(join(root, 'home-control.mjs'), 'export const name = "home-control-fixture"\nexport function apply() {}\n')
     await writeProfilePatch(profilePatch, 4200)
@@ -128,7 +135,7 @@ describe('Desktop final overlay', () => {
         version: 'v2',
         async import(specifier: string) {
           if (specifier === CONTROL_MODULE) return controlModule
-          if (specifier === './webserver.mjs') return { apply() {} }
+          if (specifier === WEB_SERVER_MODULE || specifier === './home-webserver.mjs') return { apply() {} }
           return await import(specifier)
         },
       } as unknown as NonNullable<typeof ctx.loader.internal>

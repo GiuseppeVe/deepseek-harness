@@ -155,6 +155,8 @@ function validatePatches(patches: PatchOptions[] | undefined): void {
     if (hasInsert && hasUpsert) throw new TypeError('patch cannot contain both insert and upsert')
     if (!hasUpsert) continue
     if (patch.id !== undefined) throw new TypeError('patch upsert is root-only')
+    const sibling = Object.keys(patch).find(key => key !== 'upsert' && key !== 'id')
+    if (sibling !== undefined) throw new TypeError(`patch upsert cannot contain ${sibling}`)
     if (!Array.isArray(patch.upsert) || patch.upsert.length === 0) {
       throw new TypeError('patch upsert requires at least one row')
     }
