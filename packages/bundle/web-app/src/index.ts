@@ -22,7 +22,7 @@ import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-shell-env'
 
@@ -231,6 +231,22 @@ export function apply(ctx: Context, config: Config): void {
   // Release dependent rows only after bind-dependent trust has been sampled once.
   ctx.provide(WEB_RUNTIME_SERVICE, runtime)
   ctx.plugin(FrontendStatic, { distIndex: internals.resolveDistIndex() })
+  // Keep the probe registered while the Loader tree mounts. A failed Loader
+  // settlement remains a rejection, so this route can never claim readiness.
+  const loaderSettlement = Promise.resolve()
+    .then(() => ctx.get('loader')?.await())
+  void loaderSettlement.catch(() => undefined)
+  const handler: WebRoute['handler'] = async (req, res): Promise<void> => {
+    if (req.method !== 'GET') {
+      res.writeHead(405)
+      res.end()
+      return
+    }
+    await loaderSettlement
+    res.writeHead(204)
+    res.end()
+  }
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/__dsh/ready', handler }), 'web-app: readiness route')
   if (config.surfaceContext) {
     ctx.inject(['systemPrompt'], (promptCtx) => {
       addHarnessSourceSection(promptCtx, SOURCE_ROOT)
