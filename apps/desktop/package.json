@@ -1,0 +1,8 @@
+{
+  "name": "@deepseek-ai/dsh-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "cd ../.. && vitest run apps/desktop/tests/private-state.spec.ts"
+  }
+}
