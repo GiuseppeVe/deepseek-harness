@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -31,6 +31,7 @@ describe('Desktop paths', () => {
       'mkdir:C:/Users/A/AppData/Local/DSH Desktop',
       'harden:C:/Users/A/AppData/Local/DSH Desktop',
       'mkdir:C:/Users/A/AppData/Local/DSH Desktop/logs',
+      'harden:C:/Users/A/AppData/Local/DSH Desktop',
     ])
   })
 
@@ -56,7 +57,8 @@ describe('Desktop paths', () => {
 
     await prepareDesktopPaths(resolveDesktopPaths(root), adapter)
 
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toEqual(calls[0])
     const call = calls[0]!
     expect(call.command).toBe('powershell.exe')
     expect(call.args.slice(0, 5)).toEqual(['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand'])
@@ -65,6 +67,10 @@ describe('Desktop paths', () => {
     const script = Buffer.from(call.args[5]!, 'base64').toString('utf16le')
     expect(script).toContain('WindowsIdentity]::GetCurrent().User')
     expect(script).toContain('ReparsePoint')
+    expect(script).toContain('NtCreateFile')
+    expect(script).toContain('NtQueryDirectoryFile')
+    expect(script).toContain('RootDirectory = parent.DangerousGetHandle()')
+    expect(script).not.toContain('DirectoryInfo')
     expect(script).not.toContain(root)
   })
 
@@ -72,15 +78,56 @@ describe('Desktop paths', () => {
     const parent = await mkdtemp(join(tmpdir(), 'dsh-desktop-acl-'))
     const paths = resolveDesktopPaths(parent)
     try {
+      await mkdir(join(paths.home, 'nested'), { recursive: true })
+      await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "$paths = @($env:DSH_DESKTOP_DATA_ROOT, (Join-Path $env:DSH_DESKTOP_DATA_ROOT 'nested'), (Join-Path $env:DSH_DESKTOP_DATA_ROOT 'nested\\state.json')); [void][IO.File]::WriteAllText($paths[2], 'seed'); $current = [Security.Principal.WindowsIdentity]::GetCurrent().User; $foreign = [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null); foreach ($path in $paths) { $entry = Get-Item -LiteralPath $path -Force; $acl = $entry.GetAccessControl(); $acl.SetAccessRuleProtection($true, $false); [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($current, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)); [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($foreign, [Security.AccessControl.FileSystemRights]::ReadData, [Security.AccessControl.AccessControlType]::Allow)); [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($foreign, [Security.AccessControl.FileSystemRights]::WriteData, [Security.AccessControl.AccessControlType]::Deny)); $entry.SetAccessControl($acl) }",
+      ], { env: { ...process.env, DSH_DESKTOP_DATA_ROOT: paths.home } })
       await prepareDesktopPaths(paths, createNodeWindowsDesktopPathAdapter())
       const result = await execFileAsync('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        "$entry = [System.IO.DirectoryInfo]$env:DSH_DESKTOP_DATA_ROOT; $acl = $entry.GetAccessControl(); $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $rules = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' }); $sddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access); if ($rules.Count -eq 1 -and $sddl.Contains($sid)) { 'ok' } else { 'bad' }",
+        "$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $items = @($env:DSH_DESKTOP_DATA_ROOT, (Join-Path $env:DSH_DESKTOP_DATA_ROOT 'nested'), (Join-Path $env:DSH_DESKTOP_DATA_ROOT 'nested\\state.json'), (Join-Path $env:DSH_DESKTOP_DATA_ROOT 'logs')); $valid = $true; foreach ($path in $items) { $acl = (Get-Item -LiteralPath $path -Force).GetAccessControl(); $rules = @($acl.Access); if (-not $acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid -or $rules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $rules[0].IsInherited) { $valid = $false } }; if ($valid) { 'ok' } else { 'bad' }",
       ], { env: { ...process.env, DSH_DESKTOP_DATA_ROOT: paths.home } })
       expect(result.stdout.trim()).toBe('ok')
     } finally {
+      await execFileAsync('icacls.exe', [parent, '/reset', '/T', '/C'], { windowsHide: true })
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a nested junction before touching its target', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dsh-desktop-reparse-'))
+    const paths = resolveDesktopPaths(parent)
+    const outside = join(parent, 'outside')
+    const junction = join(paths.home, 'nested', 'foreign-link')
+    try {
+      await mkdir(outside)
+      await mkdir(paths.home, { recursive: true })
+      await mkdir(join(paths.home, 'nested'))
+      await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '$entry = Get-Item -LiteralPath $env:DSH_DESKTOP_OUTSIDE -Force; $foreign = [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null); $acl = $entry.GetAccessControl(); [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($foreign, [Security.AccessControl.FileSystemRights]::ReadData, [Security.AccessControl.AccessControlType]::Allow)); $entry.SetAccessControl($acl)',
+      ], { env: { ...process.env, DSH_DESKTOP_OUTSIDE: outside } })
+      await symlink(outside, junction, 'junction')
+
+      await expect(prepareDesktopPaths(paths, createNodeWindowsDesktopPathAdapter())).rejects.toThrow('Desktop data ACL setup failed')
+
+      const result = await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        "$foreign = [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null).Value; $rules = @((Get-Item -LiteralPath $env:DSH_DESKTOP_OUTSIDE -Force).GetAccessControl().Access); if ($rules.IdentityReference | ForEach-Object { $_.Translate([Security.Principal.SecurityIdentifier]).Value } | Where-Object { $_ -eq $foreign }) { 'ok' } else { 'bad' }",
+      ], { env: { ...process.env, DSH_DESKTOP_OUTSIDE: outside } })
+      expect(result.stdout.trim()).toBe('ok')
+    } finally {
+      await rm(junction, { force: true, recursive: false })
+      await execFileAsync('icacls.exe', [parent, '/reset', '/T', '/C'], { windowsHide: true })
       await rm(parent, { recursive: true, force: true })
     }
   })

@@ -22,19 +22,28 @@ function memoryLease(initial?: BackendLease): LeaseStore & { value: BackendLease
   return store
 }
 
-function child(pid = IDENTITY.pid, tail = 'last backend line'): DesktopChild & { emitExit(code: number): void } {
+function child(pid = IDENTITY.pid, tail = 'last backend line'): DesktopChild & { disposed: number; emitExit(code: number | null): void } {
   const listeners: Array<(code: number | null) => void> = []
-  return {
+  let exited = false
+  const result: DesktopChild & { disposed: number; emitExit(code: number | null): void } = {
+    disposed: 0,
     pid,
     logTail: () => tail,
     onExit(listener) {
       listeners.push(listener)
       return () => { listeners.splice(listeners.indexOf(listener), 1) }
     },
+    async dispose() {
+      result.disposed += 1
+      if (!exited) result.emitExit(null)
+    },
     emitExit(code) {
-      for (const listener of listeners) listener(code)
+      if (exited) return
+      exited = true
+      for (const listener of [...listeners]) listener(code)
     },
   }
+  return result
 }
 
 type TestChild = ReturnType<typeof child>
@@ -50,14 +59,22 @@ function backendHarness(input: {
   spawnedChild?: TestChild
   tail?: string
   prepareData?: () => Promise<void>
+  onIdentityRequest?(child: TestChild): void
+  onLeaseWrite?(child: TestChild): Promise<void> | void
+  onWait?(child: TestChild): Promise<void> | void
 } = {}) {
   const requests: Array<{ url: string; init: RequestInit | undefined }> = []
   const spawns: SpawnRequest[] = []
   const terminations: BackendIdentity[] = []
   const monitors: Array<{ milliseconds: number; task: () => void }> = []
   let clock = 0
-  const store = memoryLease(input.lease)
   const liveChild = input.spawnedChild ?? child(IDENTITY.pid, input.tail)
+  const store = memoryLease(input.lease)
+  const writeLease = store.write
+  store.write = async (lease) => {
+    await input.onLeaseWrite?.(liveChild)
+    await writeLease(lease)
+  }
   const occupancy = [...(input.occupancy ?? ['free'])]
   const readiness = [...(input.readiness ?? [response(503), response(204)])]
   const identities = [...(input.identities ?? [
@@ -88,7 +105,10 @@ function backendHarness(input: {
       fetch: async (url, init) => {
         requests.push({ url, init })
         if (url.endsWith('/__dsh/ready')) return readiness.shift() ?? response(503)
-        if (url.endsWith('/__dsh/desktop/identity')) return identities.shift() ?? response(503)
+        if (url.endsWith('/__dsh/desktop/identity')) {
+          input.onIdentityRequest?.(liveChild)
+          return identities.shift() ?? response(503)
+        }
         if (url.endsWith('/__dsh/desktop/status')) return status.shift() ?? response(503)
         if (url.endsWith('/__dsh/desktop/shutdown')) return input.shutdown ?? response(202)
         throw new Error(`unexpected URL: ${url}`)
@@ -104,7 +124,10 @@ function backendHarness(input: {
         monitors.push({ milliseconds, task })
         return () => {}
       },
-      wait: async () => { clock += 1 },
+      wait: async () => {
+        clock += 1
+        await input.onWait?.(liveChild)
+      },
       now: () => clock,
     },
   })
@@ -180,7 +203,7 @@ describe('DshBackend', () => {
     expect(harness.terminations).toEqual([])
   })
 
-  it('does not force a spawned process that never authenticated an exact identity', async () => {
+  it('disposes a timed-out spawned child through its direct handle without generic tree termination', async () => {
     const harness = backendHarness({
       readiness: [response(503), response(503), response(503), response(503), response(503), response(503)],
       tail: 'last backend line',
@@ -188,6 +211,56 @@ describe('DshBackend', () => {
 
     await expect(harness.backend.start()).rejects.toThrow('last backend line')
 
+    expect(harness.terminations).toEqual([])
+    expect(harness.liveChild.disposed).toBe(1)
+  })
+
+  it('does not publish a lease when the child exits during identity proof', async () => {
+    const harness = backendHarness({
+      readiness: [response(204)],
+      onIdentityRequest: child => child.emitExit(1),
+    })
+
+    await expect(harness.backend.start()).rejects.toThrow('DSH Desktop backend child exited before readiness')
+
+    expect(harness.store.value).toBeUndefined()
+    expect(harness.terminations).toEqual([])
+  })
+
+  it('does not publish a lease when the child exits during lease persistence', async () => {
+    const harness = backendHarness({
+      readiness: [response(204)],
+      onLeaseWrite: child => child.emitExit(1),
+    })
+
+    await expect(harness.backend.start()).rejects.toThrow('DSH Desktop backend child exited before readiness')
+
+    expect(harness.store.value).toBeUndefined()
+    expect(harness.terminations).toEqual([])
+  })
+
+  it('disposes a fresh child when lease persistence rejects without generic tree termination', async () => {
+    const harness = backendHarness({
+      readiness: [response(204)],
+      onLeaseWrite: () => { throw new Error('lease write failed') },
+    })
+
+    await expect(harness.backend.start()).rejects.toThrow('lease write failed')
+
+    expect(harness.liveChild.disposed).toBe(1)
+    expect(harness.store.value).toBeUndefined()
+    expect(harness.terminations).toEqual([])
+  })
+
+  it('fails immediately on ready identity mismatch and disposes only the spawned child handle', async () => {
+    const harness = backendHarness({
+      readiness: [response(204)],
+      identities: [response(401)],
+    })
+
+    await expect(harness.backend.start()).rejects.toThrow('DSH Desktop port conflict')
+
+    expect(harness.liveChild.disposed).toBe(1)
     expect(harness.terminations).toEqual([])
   })
 
@@ -210,6 +283,25 @@ describe('DshBackend', () => {
 
     expect(harness.terminations).toEqual([IDENTITY])
     expect(harness.requests.some(request => request.url.endsWith('/__dsh/desktop/shutdown'))).toBe(true)
+  })
+
+  it('treats direct child exit after graceful shutdown as a successful stop', async () => {
+    let stopped = false
+    const harness = backendHarness({
+      readiness: [response(204)],
+      onWait: (child) => {
+        if (!stopped) {
+          stopped = true
+          child.emitExit(0)
+        }
+      },
+    })
+    await harness.backend.start()
+
+    await expect(harness.backend.stop()).resolves.toBeUndefined()
+
+    expect(harness.terminations).toEqual([])
+    expect(harness.store.value).toBeUndefined()
   })
 
   it('never force-terminates when PID reuse changes the current FILETIME', async () => {

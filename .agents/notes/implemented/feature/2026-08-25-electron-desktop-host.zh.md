@@ -16,11 +16,11 @@ Include 将根级 `upsert` 作为共享组合行为拥有。每个显式非空 i
 
 `dsh-host-desktop-control` 通过 effect 作用域内的 web-server 注册，注册带认证且有特定方法的状态、identity 与关闭路由。状态始终精确为 `{ activity: 'idle' | 'active' }`。identity 只返回进程 PID 和 apply 生命周期的加密 nonce；关闭在 `202` 响应完成后才调用启动器退出回调，且该回调错误会被容纳。
 
-`apps/desktop` 拥有一个 Electron-as-Node DSH 子进程。它将 DSH home、`.env`、会话、设置、有界日志和 PID/nonce/creation-FILETIME/token lease 放在 `%LOCALAPPDATA%\DSH Desktop` 下；启动会在子项写入前拒绝 reparse point，并将根目录和每个现有子项 DACL 重置为当前 SID。生产固定的已编码非交互 PowerShell 程序只通过进程环境接收根目录。
+`apps/desktop` 拥有一个 Electron-as-Node DSH 子进程。它将 DSH home、`.env`、会话、设置、有界日志和 PID/nonce/creation-FILETIME/token lease 放在 `%LOCALAPPDATA%\DSH Desktop` 下；启动会在子项写入前，以不跟随 reparse point 的方式打开每个现有项，拒绝 reparse point，并通过同一 handle 将该项 DACL 重置为当前 SID。生产固定的已编码非交互 PowerShell 程序只通过进程环境接收根目录。
 
-只有明确的回环 TCP 连接拒绝才允许 spawn。任何被占用的监听器必须证明 readiness、lease、已认证 PID/nonce identity 和当前 creation FILETIME 后才能重新连接；每个不匹配都是冲突。新子进程必须在写入 lease 前认证其已 spawn 的 PID。每次强制调用都会重新验证完整 identity，因此仅直接 spawn 永远不能允许重连后的终止。重新连接的 identity 会被有界监控。
+只有明确的回环 TCP 连接拒绝才允许 spawn。任何被占用的监听器必须证明 readiness、lease、已认证 PID/nonce identity 和当前 creation FILETIME 后才能重新连接；每个不匹配都是冲突。新子进程必须在写入 lease 前认证其已 spawn 的 PID；认证或持久化期间退出会移除 lease，而 ready 加 identity 不匹配会立即冲突。Electron 只能在所有权发布前释放仍由其直接持有的新子进程。之后每次强制调用都会重新验证完整 identity。重新连接的 identity 会被有界监控。
 
-Electron main process 持有单实例锁，在后端启动前构建并加固唯一的仅回环窗口，并排队早期 second-instance 聚焦。生命周期转换会串行化。原生对话框处理已删减的启动与后端失败恢复；renderer 没有 unavailable-event bridge。只有来自 Desktop-origin 主 frame 时，preload 才暴露冻结的状态、重启和关闭请求。每个 main-process handler 都会检查唯一 WebContents、其主 frame 和精确回环 origin。
+Electron main process 持有单实例锁，在后端启动前构建并加固唯一的仅回环窗口，并排队早期 second-instance 聚焦。生命周期转换会串行化。原生对话框处理已删减的启动与后端失败恢复；renderer 没有 unavailable-event bridge。只有来自 Desktop-origin 主 frame 时，preload 才暴露冻结的状态、重启和关闭请求。每个 main-process handler 都会检查唯一 WebContents、其主 frame 和精确回环 origin；窗口加固还会阻止非回环重定向。
 
 ## 考虑过的替代方案
 
@@ -34,4 +34,4 @@ Electron main process 持有单实例锁，在后端启动前构建并加固唯�
 
 ## 验证
 
-`packages/boot/app-boot/tests/config-dump.spec.ts` 固定替换、追加、仅根级以及无效 `upsert` 行为。`apps/cli/tests/desktop-control.e2e.ts` 启动并实时重组合冲突的 profile 与 home webserver/control 配置项。`packages/host/desktop-control/tests/desktop-control.spec.ts` 覆盖认证、identity、关闭顺序、无效 token 配置以及路由 dispose。`apps/desktop/tests` 覆盖真实 Windows DACL 重置、reparse 安全调用、完整 lease 验证、TCP 占用、精确 identity/FILETIME 重新连接与终止门、重新连接监控、串行生命周期、主 frame/origin IPC、preload 门控、早期聚焦、原生恢复、窗口加固和关闭选择。
+`packages/boot/app-boot/tests/config-dump.spec.ts` 固定替换、追加、仅根级以及无效 `upsert` 行为。`apps/cli/tests/desktop-control.e2e.ts` 启动并实时重组合冲突的 profile 与 home webserver/control 配置项。`packages/host/desktop-control/tests/desktop-control.spec.ts` 覆盖认证、identity、关闭顺序、无效 token 配置以及路由 dispose。`apps/desktop/tests` 覆盖 Windows 中外来 allow 和 deny 项的 DACL 重置、handle 绑定的 reparse 拒绝、完整 lease 验证、TCP 占用、精确 identity/FILETIME 重新连接与终止门、发布前退出与竞态清理、重新连接监控、串行生命周期、主 frame/origin IPC、preload 门控、早期聚焦、原生恢复、重定向加固和关闭选择。

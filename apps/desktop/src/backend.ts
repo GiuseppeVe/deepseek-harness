@@ -38,6 +38,8 @@ export interface DesktopChild {
   logTail(): string
   /** Subscribe to direct-child exit. */
   onExit(listener: (code: number | null) => void): () => void
+  /** Quiesce this exact spawned child without selecting a process by PID. */
+  dispose(): Promise<void>
 }
 
 /** Exact Electron-as-Node child invocation. */
@@ -105,7 +107,10 @@ export interface DshBackendOptions {
 interface OwnedBackend {
   identity: BackendIdentity
   token: string
+  /** Direct child handle retained only for a backend spawned by this supervisor. */
   child?: DesktopChild
+  /** Observe direct-child exit without waiting for serialized lifecycle cleanup. */
+  childExited?(): boolean
 }
 
 /** Validate all timeout inputs before they reach polling, monitoring, or shutdown. */
@@ -253,34 +258,57 @@ export class DshBackend {
       throw new Error('DSH Desktop backend child did not provide a positive PID')
     }
     let childExited = false
-    child.onExit(() => { childExited = true })
+    let fresh: OwnedBackend | undefined
+    child.onExit((code) => {
+      childExited = true
+      const owned = fresh
+      if (owned !== undefined) {
+        void this.serialize(async () => {
+          await this.handleChildExit(owned, code)
+        })
+      }
+    })
 
     const deadline = this.options.adapter.now() + this.options.config.startTimeoutMs
     while (this.options.adapter.now() <= deadline && !childExited) {
       if (await this.isReady()) {
         const identity = await this.authenticatedIdentity(token, child.pid)
+        if (childExited) throw this.childExitedBeforeReadiness()
         if (identity !== undefined) {
-          const fresh: OwnedBackend = { identity, token, child }
+          fresh = { identity, token, child, childExited: () => childExited }
           this.owned = fresh
           this.expectedExit = false
-          child.onExit((code) => { void this.serialize(async () => await this.handleChildExit(fresh, code)) })
           try {
             await this.options.lease.write({ ...identity, token })
           } catch (error) {
+            if (childExited) {
+              if (this.owned === fresh) this.owned = undefined
+              await this.options.lease.remove()
+              throw this.childExitedBeforeReadiness()
+            }
             try {
-              await this.forceOwned(fresh)
+              if (this.owned === fresh) this.owned = undefined
+              await child.dispose()
             } finally {
-              this.owned = undefined
+              await this.options.lease.remove()
             }
             throw error
           }
+          if (childExited) {
+            if (this.owned === fresh) this.owned = undefined
+            await this.options.lease.remove()
+            throw this.childExitedBeforeReadiness()
+          }
           return { origin: DESKTOP_ORIGIN }
         }
+        await child.dispose()
+        throw this.portConflict()
       }
       await this.options.adapter.wait(1)
     }
 
     const tail = redactDiagnostic(child.logTail().slice(-LOG_TAIL_BYTES), token)
+    if (!childExited) await child.dispose()
     throw new Error(`DSH Desktop backend did not become ready before ${String(this.options.config.startTimeoutMs)}ms: ${tail}`)
   }
 
@@ -300,7 +328,7 @@ export class DshBackend {
     }
     await this.options.adapter.wait(this.options.config.stopDeadlineMs)
     try {
-      if (this.owned === owned) await this.forceOwned(owned)
+      if (this.owned === owned && !owned.childExited?.()) await this.forceOwned(owned)
     } finally {
       if (this.owned === owned) this.owned = undefined
       await this.options.lease.remove()
@@ -382,6 +410,11 @@ export class DshBackend {
     for (const listener of this.unexpectedExitListeners) listener(code)
   }
 
+  /** Build one startup failure for a child that ended before ownership publication. */
+  private childExitedBeforeReadiness(): Error {
+    return new Error('DSH Desktop backend child exited before readiness')
+  }
+
   /** Build one non-sensitive conflict error for any foreign or mismatched listener. */
   private portConflict(): Error {
     return new Error(`DSH Desktop port conflict at ${DESKTOP_ORIGIN}`)
@@ -406,13 +439,43 @@ function createNodeChild(request: SpawnRequest): DesktopChild {
   }
   process.stdout?.on('data', append)
   process.stderr?.on('data', append)
+  let exited = false
+  let exitCode: number | null = null
+  const exitListeners = new Set<(code: number | null) => void>()
+  process.once('exit', (code: number | null) => {
+    exited = true
+    exitCode = code
+    for (const listener of [...exitListeners]) listener(code)
+  })
   return {
     pid: process.pid ?? -1,
     logTail: () => tail,
     onExit(listener) {
-      const onExit = (code: number | null): void => { listener(code) }
-      process.once('exit', onExit)
-      return () => { process.off('exit', onExit) }
+      if (exited) {
+        listener(exitCode)
+        return () => {}
+      }
+      exitListeners.add(listener)
+      return () => { exitListeners.delete(listener) }
+    },
+    async dispose() {
+      if (exited) return
+      await new Promise<void>((resolve, reject) => {
+        const onExit = (): void => {
+          exitListeners.delete(onExit)
+          resolve()
+        }
+        exitListeners.add(onExit)
+        try {
+          if (!process.kill()) {
+            exitListeners.delete(onExit)
+            resolve()
+          }
+        } catch (error) {
+          exitListeners.delete(onExit)
+          reject(error)
+        }
+      })
     },
   }
 }

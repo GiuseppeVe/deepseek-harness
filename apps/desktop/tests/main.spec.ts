@@ -7,12 +7,14 @@ function fakeWindow(): DesktopWindow & {
   closeListeners: Array<(event: { preventDefault(): void }) => void>
   navigateListeners: Array<(event: { preventDefault(): void }, url: string) => void>
   frameNavigateListeners: Array<(event: { preventDefault(): void }, url: string) => void>
+  redirectListeners: Array<(event: { preventDefault(): void }, url: string) => void>
   focusCount: number
   restoreCount: number
 } {
   const closeListeners: Array<(event: { preventDefault(): void }) => void> = []
   const navigateListeners: Array<(event: { preventDefault(): void }, url: string) => void> = []
   const frameNavigateListeners: Array<(event: { preventDefault(): void }, url: string) => void> = []
+  const redirectListeners: Array<(event: { preventDefault(): void }, url: string) => void> = []
   const mainFrame = { url: 'http://127.0.0.1:3080/' }
   const window: DesktopWindow & {
     options: unknown
@@ -20,6 +22,7 @@ function fakeWindow(): DesktopWindow & {
     closeListeners: Array<(event: { preventDefault(): void }) => void>
     navigateListeners: Array<(event: { preventDefault(): void }, url: string) => void>
     frameNavigateListeners: Array<(event: { preventDefault(): void }, url: string) => void>
+    redirectListeners: Array<(event: { preventDefault(): void }, url: string) => void>
     focusCount: number
     restoreCount: number
   } = {
@@ -28,6 +31,7 @@ function fakeWindow(): DesktopWindow & {
     closeListeners,
     navigateListeners,
     frameNavigateListeners,
+    redirectListeners,
     focusCount: 0,
     restoreCount: 0,
     webContents: {
@@ -36,6 +40,7 @@ function fakeWindow(): DesktopWindow & {
       on: (event, listener) => {
         if (event === 'will-navigate') navigateListeners.push(listener as (event: { preventDefault(): void }, url: string) => void)
         if (event === 'will-frame-navigate') frameNavigateListeners.push(listener as (event: { preventDefault(): void }, url: string) => void)
+        if (event === 'will-redirect') redirectListeners.push(listener as (event: { preventDefault(): void }, url: string) => void)
       },
     },
     loadURL: async (url) => { window.loaded.push(url) },
@@ -140,9 +145,13 @@ describe('Desktop main process', () => {
     const externalMain = { prevented: false, preventDefault() { this.prevented = true } }
     const externalFrame = { prevented: false, preventDefault() { this.prevented = true } }
     const localFrame = { prevented: false, preventDefault() { this.prevented = true } }
+    const externalMainRedirect = { prevented: false, preventDefault() { this.prevented = true } }
+    const externalFrameRedirect = { prevented: false, preventDefault() { this.prevented = true } }
     window.navigateListeners[0]?.(externalMain, 'https://example.com')
     window.frameNavigateListeners[0]?.(externalFrame, 'https://example.com/frame')
     window.frameNavigateListeners[0]?.(localFrame, 'http://127.0.0.1:3080/frame')
+    window.redirectListeners[0]?.(externalMainRedirect, 'https://example.com/main-redirect')
+    window.redirectListeners[0]?.(externalFrameRedirect, 'https://example.com/frame-redirect')
 
     expect(created).toBe(1)
     expect(window.loaded).toEqual(['http://127.0.0.1:3080'])
@@ -158,6 +167,8 @@ describe('Desktop main process', () => {
     expect(externalMain.prevented).toBe(true)
     expect(externalFrame.prevented).toBe(true)
     expect(localFrame.prevented).toBe(false)
+    expect(externalMainRedirect.prevented).toBe(true)
+    expect(externalFrameRedirect.prevented).toBe(true)
   })
 
   it('uses native retry recovery for a redacted startup failure and loads only after success', async () => {

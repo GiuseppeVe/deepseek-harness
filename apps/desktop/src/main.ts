@@ -19,8 +19,8 @@ export interface DesktopWebContents {
   mainFrame: unknown
   /** Deny every attempted secondary window. */
   setWindowOpenHandler(listener: (details: unknown) => { action: 'deny' }): void
-  /** Observe every main or subframe navigation attempt. */
-  on(event: 'will-navigate' | 'will-frame-navigate', listener: (event: { preventDefault(): void }, url: string) => void): void
+  /** Observe every main or subframe navigation attempt and redirect. */
+  on(event: 'will-navigate' | 'will-frame-navigate' | 'will-redirect', listener: (event: { preventDefault(): void }, url: string) => void): void
 }
 
 /** Electron BrowserWindow capabilities used by Desktop main. */
@@ -159,6 +159,7 @@ export function createDesktopMain(options: DesktopMainOptions): DesktopMainContr
     }
     created.webContents.on('will-navigate', denyNonDesktopNavigation)
     created.webContents.on('will-frame-navigate', denyNonDesktopNavigation)
+    created.webContents.on('will-redirect', denyNonDesktopNavigation)
     created.on('close', (event) => {
       if (closing) return
       event.preventDefault()
