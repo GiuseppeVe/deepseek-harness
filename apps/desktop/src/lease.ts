@@ -5,12 +5,22 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 /** Minimum length enforced by the backend control-route configuration. */
 const MINIMUM_CONTROL_TOKEN_LENGTH = 32
 
-/** PID and bearer token required to authenticate one backend listener. */
-export interface BackendLease {
+/** Exact Windows process identity proven by the authenticated control route. */
+export interface BackendIdentity {
   /** Root process PID for the owned backend tree. */
   pid: number
+  /** Apply-lifetime opaque control-route instance nonce. */
+  nonce: string
+  /** Windows process creation time as an unsigned decimal FILETIME. */
+  creationFiletime: string
+}
+
+/** Exact identity plus bearer token required to authenticate one backend listener. */
+export interface BackendLease extends BackendIdentity {
   /** Process-local token accepted by the Desktop control routes. */
   token: string
+  /** Windows process creation time as an unsigned decimal FILETIME. */
+  creationFiletime: string
 }
 
 /** Lease persistence used by the backend supervisor. */
@@ -37,13 +47,29 @@ export interface LeaseFileAdapter {
 function validateLease(value: unknown): BackendLease {
   if (typeof value !== 'object' || value === null) throw new Error('invalid Desktop backend lease')
   const record = value as Record<string, unknown>
-  if (!Number.isSafeInteger(record.pid) || (record.pid as number) <= 0 || typeof record.token !== 'string' || record.token.length < MINIMUM_CONTROL_TOKEN_LENGTH) {
+  if (!Number.isSafeInteger(record.pid)
+    || (record.pid as number) <= 0
+    || typeof record.nonce !== 'string'
+    || !/^[A-Za-z0-9_-]{32,}$/.test(record.nonce)
+    || typeof record.token !== 'string'
+    || record.token.length < MINIMUM_CONTROL_TOKEN_LENGTH
+    || typeof record.creationFiletime !== 'string'
+    || !/^[1-9][0-9]{16,19}$/.test(record.creationFiletime)) {
     throw new Error('invalid Desktop backend lease')
   }
-  if (Object.keys(record).length !== 2 || !Object.hasOwn(record, 'pid') || !Object.hasOwn(record, 'token')) {
+  if (Object.keys(record).length !== 4
+    || !Object.hasOwn(record, 'pid')
+    || !Object.hasOwn(record, 'nonce')
+    || !Object.hasOwn(record, 'token')
+    || !Object.hasOwn(record, 'creationFiletime')) {
     throw new Error('invalid Desktop backend lease')
   }
-  return { pid: record.pid as number, token: record.token as string }
+  return {
+    pid: record.pid as number,
+    nonce: record.nonce as string,
+    token: record.token as string,
+    creationFiletime: record.creationFiletime as string,
+  }
 }
 
 /** Build a file-backed lease store with no diagnostic or metadata fields. */

@@ -12,9 +12,11 @@
 
 `GET /__dsh/desktop/status` 需要 `Authorization: Bearer <token>`，并且只返回一个 JSON 字段：`{"activity":"idle"}` 或 `{"activity":"active"}`。任一当前 `ctx.agents.list()` 项目的 `status === 'running'` 时，活动状态为 active。
 
+`GET /__dsh/desktop/identity` 需要相同凭证，并返回当前进程 PID 与一个 apply 生命周期的加密 nonce。Desktop 将此私有响应与 Windows 进程 creation FILETIME 一起使用，以区分保留的后端与 PID 重用。identity 绝不记录、渲染或 preload。
+
 `POST /__dsh/desktop/shutdown` 需要相同凭证。它返回 `202`，然后调用启动器提供的 `ctx.appExit(0)`；它绝不直接退出进程。缺少启动器钩子时，激活会失败。其他 method 返回 `405`；缺失或无效凭证返回 `401`。同长度凭证使用 `timingSafeEqual`。路由不添加 CORS header。
 
-路由注册是 `ctx.effect()` 资源，因此卸载此插件会移除两个控制接口。
+路由注册是 `ctx.effect()` 资源，因此卸载此插件会移除全部控制接口。
 
 ## 模型体验
 

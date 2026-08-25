@@ -1,6 +1,6 @@
 /** Narrow authenticated Electron IPC registration for DSH Desktop. */
 
-import type { BackendReady, BackendStatus } from './backend.ts'
+import { DESKTOP_ORIGIN, type BackendReady, type BackendStatus } from './backend.ts'
 
 /** Renderer IPC channel names owned by Desktop main. */
 export const DESKTOP_IPC_CHANNELS = {
@@ -13,6 +13,8 @@ export const DESKTOP_IPC_CHANNELS = {
 export interface DesktopIpcEvent {
   /** Electron webContents that invoked the handler. */
   sender: unknown
+  /** Electron frame that invoked the handler. */
+  senderFrame: unknown
 }
 
 /** Minimal main-process IPC registrar. */
@@ -33,11 +35,18 @@ export interface DesktopIpcBackend {
 export function registerDesktopIpc(
   ipc: DesktopIpcMain,
   mainContents: () => unknown,
+  mainFrame: () => unknown,
   backend: DesktopIpcBackend,
   requestClose: () => Promise<boolean>,
 ): void {
   const requireMainWindow = (event: DesktopIpcEvent): void => {
-    if (event.sender !== mainContents()) throw new Error('Desktop IPC sender rejected')
+    if (event.sender !== mainContents() || event.senderFrame !== mainFrame()) throw new Error('Desktop IPC sender rejected')
+    if (typeof event.senderFrame !== 'object' || event.senderFrame === null || !('url' in event.senderFrame)) throw new Error('Desktop IPC sender rejected')
+    try {
+      if (new URL(event.senderFrame.url as string).origin !== DESKTOP_ORIGIN) throw new Error('Desktop IPC sender rejected')
+    } catch {
+      throw new Error('Desktop IPC sender rejected')
+    }
   }
   ipc.handle(DESKTOP_IPC_CHANNELS.status, async (event) => {
     requireMainWindow(event)

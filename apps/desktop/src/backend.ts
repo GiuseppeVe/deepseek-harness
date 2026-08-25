@@ -1,9 +1,12 @@
 /** Owned DSH web-backend lifecycle for the Electron main process. */
 
-import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { connect } from 'node:net'
+import { promisify } from 'node:util'
+import { execFile } from 'node:child_process'
+import type { BackendIdentity, LeaseStore } from './lease.ts'
 import type { DesktopPaths } from './paths.ts'
-import type { LeaseStore } from './lease.ts'
 
 /** Fixed loopback hostname exposed to the sole Desktop window. */
 export const DESKTOP_HOST = '127.0.0.1' as const
@@ -14,6 +17,7 @@ export const DESKTOP_ORIGIN = `http://${DESKTOP_HOST}:${String(DESKTOP_PORT)}` a
 
 const READY_PATH = '/__dsh/ready'
 const STATUS_PATH = '/__dsh/desktop/status'
+const IDENTITY_PATH = '/__dsh/desktop/identity'
 const SHUTDOWN_PATH = '/__dsh/desktop/shutdown'
 const LOG_TAIL_BYTES = 8 * 1024
 
@@ -50,10 +54,16 @@ export interface SpawnRequest {
 export interface BackendAdapter {
   /** Send one loopback control request. */
   fetch(url: string, init?: RequestInit): Promise<Response>
+  /** Probe TCP occupancy; only an explicit refusal reports a free port. */
+  probeLoopback(): Promise<'free' | 'occupied'>
+  /** Read a live process creation FILETIME, or report no current process. */
+  creationFiletime(pid: number): Promise<string | undefined>
   /** Spawn exactly one Electron-as-Node child. */
   spawn(request: SpawnRequest): DesktopChild
-  /** Force one already authenticated owned process tree. */
-  terminateTree(pid: number): Promise<void>
+  /** Force one process tree only after the caller proves this full identity. */
+  terminateTree(identity: BackendIdentity): Promise<void>
+  /** Schedule a bounded periodic identity check and return its disposer. */
+  monitor(milliseconds: number, task: () => void): () => void
   /** Wait one bounded lifecycle interval. */
   wait(milliseconds: number): Promise<void>
   /** Read monotonic milliseconds for bounded polling. */
@@ -72,6 +82,8 @@ export interface DesktopBackendConfig {
   startTimeoutMs: number
   /** Grace period after authenticated shutdown before tree termination. */
   stopDeadlineMs: number
+  /** Bounded interval used only to verify a reattached backend remains exact. */
+  reattachMonitorMs: number
 }
 
 /** Constructor input for a source-level DSH backend supervisor. */
@@ -91,12 +103,12 @@ export interface DshBackendOptions {
 }
 
 interface OwnedBackend {
-  pid: number
+  identity: BackendIdentity
   token: string
   child?: DesktopChild
 }
 
-/** Validate all timeout inputs before they reach polling or shutdown. */
+/** Validate all timeout inputs before they reach polling, monitoring, or shutdown. */
 function requirePositiveTimeout(name: string, value: number): void {
   if (!Number.isFinite(value) || value <= 0) throw new Error(`Desktop backend ${name} must be a positive finite number`)
 }
@@ -114,30 +126,106 @@ function controlHeaders(token: string): Headers {
   return new Headers({ authorization: `Bearer ${token}` })
 }
 
+/** Check an identity value before it can authorize a force termination. */
+function isBackendIdentity(value: unknown): value is BackendIdentity {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return Number.isSafeInteger(record.pid)
+    && (record.pid as number) > 0
+    && typeof record.nonce === 'string'
+    && /^[A-Za-z0-9_-]{32,}$/.test(record.nonce)
+    && typeof record.creationFiletime === 'string'
+    && /^[1-9][0-9]{16,19}$/.test(record.creationFiletime)
+}
+
+/** Compare all fields used to distinguish PID reuse from an owned backend. */
+function isSameIdentity(left: BackendIdentity, right: BackendIdentity): boolean {
+  return left.pid === right.pid
+    && left.nonce === right.nonce
+    && left.creationFiletime === right.creationFiletime
+}
+
 /** Owns one authenticated DSH child, never a generic port process. */
 export class DshBackend {
   private owned: OwnedBackend | undefined
   private expectedExit = false
+  private monitorDisposer: (() => void) | undefined
+  private monitorInspecting = false
+  private lifecycle: Promise<void> = Promise.resolve()
   private readonly unexpectedExitListeners = new Set<(code: number | null) => void>()
 
   /** Construct an idle supervisor with explicit process and timing dependencies. */
   constructor(private readonly options: DshBackendOptions) {
     requirePositiveTimeout('start timeout', options.config.startTimeoutMs)
     requirePositiveTimeout('stop deadline', options.config.stopDeadlineMs)
+    requirePositiveTimeout('reattach monitor interval', options.config.reattachMonitorMs)
   }
 
-  /** Start a new child or reattach only to a token-authenticated lease holder. */
+  /** Start a new child or reattach only to an exact authenticated lease holder. */
   async start(): Promise<BackendReady> {
+    return await this.serialize(async () => await this.startInternal())
+  }
+
+  /** Query aggregate work state through the authenticated local route. */
+  async status(): Promise<BackendStatus> {
+    const owned = this.owned
+    if (owned === undefined) return 'unavailable'
+    try {
+      const response = await this.options.adapter.fetch(`${DESKTOP_ORIGIN}${STATUS_PATH}`, { headers: controlHeaders(owned.token) })
+      if (!response.ok) return 'unavailable'
+      const body = await response.json() as { activity?: unknown }
+      if (body.activity === 'idle' || body.activity === 'active') return body.activity
+      return 'unavailable'
+    } catch {
+      return 'unavailable'
+    }
+  }
+
+  /** Request graceful stop, then force only an exact currently authenticated identity. */
+  async stop(): Promise<void> {
+    await this.serialize(async () => await this.stopInternal())
+  }
+
+  /** Stop and start one backend using the same user-owned data root and port. */
+  async restart(): Promise<BackendReady> {
+    return await this.serialize(async () => {
+      await this.stopInternal()
+      this.expectedExit = false
+      return await this.startInternal()
+    })
+  }
+
+  /** Subscribe to failures that keep the Electron window available for native recovery. */
+  onUnexpectedExit(listener: (code: number | null) => void): () => void {
+    this.unexpectedExitListeners.add(listener)
+    return () => { this.unexpectedExitListeners.delete(listener) }
+  }
+
+  /** Serialize lifecycle transitions while allowing status reads to remain nonblocking. */
+  private async serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycle.then(operation, operation)
+    this.lifecycle = run.then(() => undefined, () => undefined)
+    return await run
+  }
+
+  /** Start a backend after the caller owns the serialized lifecycle transition. */
+  private async startInternal(): Promise<BackendReady> {
     if (this.owned !== undefined) return { origin: DESKTOP_ORIGIN }
     await this.options.prepareData()
 
-    if (await this.isReady()) {
+    if (await this.options.adapter.probeLoopback() === 'occupied') {
       const retained = await this.options.lease.read()
-      if (retained !== undefined && await this.authenticate(retained.token)) {
-        this.owned = { pid: retained.pid, token: retained.token }
-        return { origin: DESKTOP_ORIGIN }
+      if (retained !== undefined && await this.isReady()) {
+        const observed = await this.authenticatedIdentity(retained.token, retained.pid)
+        if (observed !== undefined && isSameIdentity(observed, retained)) {
+          const reattached: OwnedBackend = { identity: retained, token: retained.token }
+          this.owned = reattached
+          this.expectedExit = false
+          this.monitorReattached(reattached)
+          return { origin: DESKTOP_ORIGIN }
+        }
       }
-      throw new Error(`DSH Desktop port conflict at ${DESKTOP_ORIGIN}`)
+      throw this.portConflict()
     }
 
     const token = this.options.createToken()
@@ -164,70 +252,59 @@ export class DshBackend {
     if (!Number.isSafeInteger(child.pid) || child.pid <= 0) {
       throw new Error('DSH Desktop backend child did not provide a positive PID')
     }
-    this.expectedExit = false
-    this.owned = { pid: child.pid, token, child }
-    child.onExit((code) => { void this.handleChildExit(child.pid, code) })
+    let childExited = false
+    child.onExit(() => { childExited = true })
 
     const deadline = this.options.adapter.now() + this.options.config.startTimeoutMs
-    while (this.options.adapter.now() <= deadline) {
-      if (await this.isReady() && await this.authenticate(token)) {
-        await this.options.lease.write({ pid: child.pid, token })
-        return { origin: DESKTOP_ORIGIN }
+    while (this.options.adapter.now() <= deadline && !childExited) {
+      if (await this.isReady()) {
+        const identity = await this.authenticatedIdentity(token, child.pid)
+        if (identity !== undefined) {
+          const fresh: OwnedBackend = { identity, token, child }
+          this.owned = fresh
+          this.expectedExit = false
+          child.onExit((code) => { void this.serialize(async () => await this.handleChildExit(fresh, code)) })
+          try {
+            await this.options.lease.write({ ...identity, token })
+          } catch (error) {
+            try {
+              await this.forceOwned(fresh)
+            } finally {
+              this.owned = undefined
+            }
+            throw error
+          }
+          return { origin: DESKTOP_ORIGIN }
+        }
       }
       await this.options.adapter.wait(1)
     }
 
-    await this.forceOwned(child.pid)
-    this.owned = undefined
     const tail = redactDiagnostic(child.logTail().slice(-LOG_TAIL_BYTES), token)
     throw new Error(`DSH Desktop backend did not become ready before ${String(this.options.config.startTimeoutMs)}ms: ${tail}`)
   }
 
-  /** Query aggregate work state through the authenticated local route. */
-  async status(): Promise<BackendStatus> {
-    const owned = this.owned
-    if (owned === undefined) return 'unavailable'
-    try {
-      const response = await this.options.adapter.fetch(`${DESKTOP_ORIGIN}${STATUS_PATH}`, { headers: controlHeaders(owned.token) })
-      if (!response.ok) return 'unavailable'
-      const body = await response.json() as { activity?: unknown }
-      if (body.activity === 'idle' || body.activity === 'active') return body.activity
-      return 'unavailable'
-    } catch {
-      return 'unavailable'
-    }
-  }
-
-  /** Request graceful stop, then terminate only an authenticated owned tree. */
-  async stop(): Promise<void> {
+  /** Stop an authenticated identity after the caller owns the serialized lifecycle transition. */
+  private async stopInternal(): Promise<void> {
     const owned = this.owned
     if (owned === undefined) return
     this.expectedExit = true
+    this.stopMonitor()
     try {
       await this.options.adapter.fetch(`${DESKTOP_ORIGIN}${SHUTDOWN_PATH}`, {
         method: 'POST',
         headers: controlHeaders(owned.token),
       })
     } catch {
-      // The owned child may already be exiting; bounded termination remains required.
+      // The authenticated backend may already be exiting; identity proof still gates force termination.
     }
     await this.options.adapter.wait(this.options.config.stopDeadlineMs)
-    if (this.owned?.pid === owned.pid) await this.forceOwned(owned.pid)
-    this.owned = undefined
-    await this.options.lease.remove()
-  }
-
-  /** Stop and start one backend using the same user-owned data root and port. */
-  async restart(): Promise<BackendReady> {
-    await this.stop()
-    this.expectedExit = false
-    return await this.start()
-  }
-
-  /** Subscribe to crashes that keep the Electron window available for restart. */
-  onUnexpectedExit(listener: (code: number | null) => void): () => void {
-    this.unexpectedExitListeners.add(listener)
-    return () => { this.unexpectedExitListeners.delete(listener) }
+    try {
+      if (this.owned === owned) await this.forceOwned(owned)
+    } finally {
+      if (this.owned === owned) this.owned = undefined
+      await this.options.lease.remove()
+    }
   }
 
   /** Probe the stable readiness route without interpreting a foreign response as healthy. */
@@ -239,32 +316,75 @@ export class DshBackend {
     }
   }
 
-  /** Prove a listener owns the exact token recorded or generated by Desktop. */
-  private async authenticate(token: string): Promise<boolean> {
+  /** Authenticate one control route, bind it to the live process FILETIME, and optionally require a PID. */
+  private async authenticatedIdentity(token: string, requiredPid?: number): Promise<BackendIdentity | undefined> {
     try {
-      const response = await this.options.adapter.fetch(`${DESKTOP_ORIGIN}${STATUS_PATH}`, { headers: controlHeaders(token) })
-      if (!response.ok) return false
-      const body = await response.json() as { activity?: unknown }
-      return body.activity === 'idle' || body.activity === 'active'
+      const response = await this.options.adapter.fetch(`${DESKTOP_ORIGIN}${IDENTITY_PATH}`, { headers: controlHeaders(token) })
+      if (!response.ok) return undefined
+      const body = await response.json() as { pid?: unknown; nonce?: unknown }
+      if (!Number.isSafeInteger(body.pid) || (body.pid as number) <= 0 || typeof body.nonce !== 'string' || !/^[A-Za-z0-9_-]{32,}$/.test(body.nonce)) return undefined
+      if (requiredPid !== undefined && body.pid !== requiredPid) return undefined
+      const creationFiletime = await this.options.adapter.creationFiletime(body.pid as number)
+      const identity = { pid: body.pid as number, nonce: body.nonce, creationFiletime }
+      return isBackendIdentity(identity) ? identity : undefined
     } catch {
-      return false
+      return undefined
     }
   }
 
-  /** Force one selected child root only after its token was authenticated. */
-  private async forceOwned(pid: number): Promise<void> {
-    if (this.owned?.pid !== pid) return
-    await this.options.adapter.terminateTree(pid)
+  /** Force only an owned identity that still authenticates and has the same Windows FILETIME. */
+  private async forceOwned(owned: OwnedBackend): Promise<void> {
+    if (this.owned !== owned) return
+    const observed = await this.authenticatedIdentity(owned.token, owned.identity.pid)
+    if (observed === undefined || !isSameIdentity(observed, owned.identity)) throw this.portConflict()
+    await this.options.adapter.terminateTree(owned.identity)
   }
 
-  /** Update exit state without presenting a requested shutdown as a crash. */
-  private async handleChildExit(pid: number, code: number | null): Promise<void> {
-    if (this.owned?.pid !== pid) return
+  /** Poll an externally reattached backend without treating it as a direct child. */
+  private monitorReattached(owned: OwnedBackend): void {
+    this.stopMonitor()
+    this.monitorDisposer = this.options.adapter.monitor(this.options.config.reattachMonitorMs, () => {
+      if (this.monitorInspecting) return
+      this.monitorInspecting = true
+      void this.serialize(async () => {
+        try {
+          if (this.owned !== owned) return
+          const observed = await this.authenticatedIdentity(owned.token, owned.identity.pid)
+          if (observed === undefined || !isSameIdentity(observed, owned.identity)) await this.markUnavailable(owned, null)
+        } finally {
+          this.monitorInspecting = false
+        }
+      })
+    })
+  }
+
+  /** Stop a reattach-only identity monitor before changing ownership. */
+  private stopMonitor(): void {
+    this.monitorDisposer?.()
+    this.monitorDisposer = undefined
+    this.monitorInspecting = false
+  }
+
+  /** Update direct-child exit state without presenting a requested shutdown as a crash. */
+  private async handleChildExit(owned: OwnedBackend, code: number | null): Promise<void> {
+    if (this.owned !== owned) return
+    await this.markUnavailable(owned, code)
+  }
+
+  /** Clear an invalid or exited identity without ever terminating an unproven process. */
+  private async markUnavailable(owned: OwnedBackend, code: number | null): Promise<void> {
+    if (this.owned !== owned) return
     const expected = this.expectedExit
+    this.stopMonitor()
     this.owned = undefined
     await this.options.lease.remove()
     if (expected) return
     for (const listener of this.unexpectedExitListeners) listener(code)
+  }
+
+  /** Build one non-sensitive conflict error for any foreign or mismatched listener. */
+  private portConflict(): Error {
+    return new Error(`DSH Desktop port conflict at ${DESKTOP_ORIGIN}`)
   }
 }
 
@@ -297,25 +417,75 @@ function createNodeChild(request: SpawnRequest): DesktopChild {
   }
 }
 
-/** Spawn `taskkill` for one child tree and wait only for the command to settle. */
-function terminateWindowsTree(pid: number): Promise<void> {
+/** Treat only a refused loopback TCP connection as free; all other outcomes are occupied. */
+function probeLoopbackTcp(): Promise<'free' | 'occupied'> {
   return new Promise((resolve) => {
-    if (!Number.isSafeInteger(pid) || pid <= 0) {
+    const socket = connect(DESKTOP_PORT, DESKTOP_HOST)
+    let settled = false
+    const finish = (result: 'free' | 'occupied'): void => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(result)
+    }
+    socket.once('connect', () => { finish('occupied') })
+    socket.once('timeout', () => { finish('occupied') })
+    socket.once('error', (error: NodeJS.ErrnoException) => { finish(error.code === 'ECONNREFUSED' ? 'free' : 'occupied') })
+    socket.setTimeout(1_000)
+  })
+}
+
+/** Spawn `taskkill` for one proven child tree and wait only for the command to settle. */
+function terminateWindowsTree(identity: BackendIdentity): Promise<void> {
+  return new Promise((resolve) => {
+    if (!Number.isSafeInteger(identity.pid) || identity.pid <= 0) {
       resolve()
       return
     }
-    const command = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    const command = spawn('taskkill', ['/PID', String(identity.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
     command.once('error', () => { resolve() })
     command.once('close', () => { resolve() })
   })
+}
+
+const execFileAsync = promisify(execFile)
+const PROCESS_FILETIME_SCRIPT = '$id = [int][Environment]::GetEnvironmentVariable(\'DSH_DESKTOP_PROCESS_ID\', \'Process\'); [Console]::Out.Write(([Diagnostics.Process]::GetProcessById($id).StartTime.ToUniversalTime().ToFileTimeUtc()).ToString())'
+
+/** Read a live Windows FILETIME without embedding the PID in a command string. */
+async function readWindowsCreationFiletime(pid: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
+  try {
+    const result = await execFileAsync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      Buffer.from(PROCESS_FILETIME_SCRIPT, 'utf16le').toString('base64'),
+    ], { env: { ...process.env, DSH_DESKTOP_PROCESS_ID: String(pid) }, windowsHide: true })
+    const value = result.stdout.trim()
+    return /^[1-9][0-9]{16,19}$/.test(value) ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Schedule a disposable identity monitor that cannot keep Electron alive by itself. */
+function monitorIdentity(milliseconds: number, task: () => void): () => void {
+  const timer = setInterval(task, milliseconds)
+  timer.unref()
+  return () => { clearInterval(timer) }
 }
 
 /** Production process and loopback operations for Electron's Windows main process. */
 export function createNodeBackendAdapter(): BackendAdapter {
   return {
     fetch: async (url, init) => await fetch(url, init),
+    probeLoopback: probeLoopbackTcp,
+    creationFiletime: readWindowsCreationFiletime,
     spawn: createNodeChild,
     terminateTree: terminateWindowsTree,
+    monitor: monitorIdentity,
     wait: async milliseconds => await new Promise((resolve) => { setTimeout(resolve, milliseconds) }),
     now: () => Date.now(),
   }

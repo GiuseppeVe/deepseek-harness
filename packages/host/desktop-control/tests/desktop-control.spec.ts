@@ -135,6 +135,20 @@ describe('Desktop control routes', () => {
     expect(idle.headers.get('access-control-allow-origin')).toBeNull()
     expect(await idle.json()).toEqual({ activity: 'idle' })
 
+    const identity = await request(port, '/__dsh/desktop/identity', {
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    })
+    expect(identity.status).toBe(200)
+    expect(await identity.json()).toEqual({
+      pid: process.pid,
+      nonce: expect.stringMatching(/^[A-Za-z0-9_-]{32,}$/),
+    })
+    const identityMethod = await request(port, '/__dsh/desktop/identity', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    })
+    expect(identityMethod.status).toBe(405)
+
     agents = [{ status: 'running' }]
     const active = await request(port, '/__dsh/desktop/status', {
       headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
@@ -229,6 +243,9 @@ describe('Desktop control routes', () => {
     expect((await request(port, '/__dsh/desktop/status')).status).toBe(404)
     expect((await request(port, '/__dsh/desktop/shutdown', {
       method: 'POST',
+      headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
+    })).status).toBe(404)
+    expect((await request(port, '/__dsh/desktop/identity', {
       headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
     })).status).toBe(404)
     expect(exitCodes).toEqual([])

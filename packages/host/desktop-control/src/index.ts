@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-host-desktop-control
  */
 
-import { timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -22,6 +22,8 @@ export const inject = ['webServer', 'agents']
 export const STATUS_PATH = '/__dsh/desktop/status'
 /** Exact loopback route requesting launcher-owned shutdown. */
 export const SHUTDOWN_PATH = '/__dsh/desktop/shutdown'
+/** Exact loopback route proving the currently running backend instance. */
+export const IDENTITY_PATH = '/__dsh/desktop/identity'
 
 /** Plugin config for the process-local control authority. */
 export interface Config {
@@ -63,6 +65,20 @@ function statusHandler(ctx: Context, expected: Buffer, req: IncomingMessage, res
   res.end(JSON.stringify({ activity }))
 }
 
+/** Return the process identity paired with one apply-lifetime opaque nonce. */
+function identityHandler(nonce: string, expected: Buffer, req: IncomingMessage, res: ServerResponse): void {
+  if (!authorized(req, expected)) {
+    reject(res, 401)
+    return
+  }
+  if (req.method !== 'GET') {
+    reject(res, 405)
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify({ pid: process.pid, nonce }))
+}
+
 /** Acknowledge a valid shutdown request before handing control to the launcher. */
 function shutdownHandler(
   exit: (code: number) => void,
@@ -101,11 +117,17 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('desktop-control: launcher must provide ctx.appExit before control routes mount')
   }
   const expected = Buffer.from(config.token)
+  const nonce = randomBytes(32).toString('base64url')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: STATUS_PATH,
     handler: (req, res) => { statusHandler(ctx, expected, req, res) },
   }), 'desktop-control: status route')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: IDENTITY_PATH,
+    handler: (req, res) => { identityHandler(nonce, expected, req, res) },
+  }), 'desktop-control: identity route')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: SHUTDOWN_PATH,

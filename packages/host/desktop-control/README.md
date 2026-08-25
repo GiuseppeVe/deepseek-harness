@@ -12,9 +12,11 @@ Authenticated control routes for a Desktop launcher. This plugin exposes only ag
 
 `GET /__dsh/desktop/status` requires `Authorization: Bearer <token>` and returns exactly one JSON field: `{"activity":"idle"}` or `{"activity":"active"}`. Activity is active when any current `ctx.agents.list()` item has `status === 'running'`.
 
+`GET /__dsh/desktop/identity` requires the same credential and returns the current process PID plus one apply-lifetime cryptographic nonce. Desktop uses this private response with the Windows process creation FILETIME to distinguish a retained backend from PID reuse. The identity is never logged, rendered, or preloaded.
+
 `POST /__dsh/desktop/shutdown` requires the same credential. It returns `202`, then calls launcher-provided `ctx.appExit(0)`; it never exits the process directly. Activation fails when that launcher hook is absent. Other methods return `405`; missing or invalid credentials return `401`. Same-length credentials use `timingSafeEqual`. The routes add no CORS headers.
 
-Route registrations are `ctx.effect()` resources, so unloading this plugin removes both controls.
+Route registrations are `ctx.effect()` resources, so unloading this plugin removes all controls.
 
 ## Model experience
 

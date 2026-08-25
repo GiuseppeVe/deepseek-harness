@@ -1,6 +1,6 @@
 /** Frozen renderer API for DSH Desktop's Electron preload. */
 
-import type { BackendReady, BackendStatus } from './backend.ts'
+import { DESKTOP_ORIGIN, type BackendReady, type BackendStatus } from './backend.ts'
 import { DESKTOP_IPC_CHANNELS } from './ipc.ts'
 
 /** Renderer-side invocation primitive supplied by Electron's ipcRenderer. */
@@ -46,7 +46,19 @@ export function exposePreloadApi(
   bridge.exposeInMainWorld('dshDesktop', createPreloadApi(invoker))
 }
 
-if (process.versions.electron !== undefined) {
+/** Return whether preload may expose API in this Electron renderer document. */
+export function canExposePreloadApi(isMainFrame: boolean, href: string | undefined): boolean {
+  if (!isMainFrame || href === undefined) return false
+  try {
+    return new URL(href).origin === DESKTOP_ORIGIN
+  } catch {
+    return false
+  }
+}
+
+const electronProcess = process as NodeJS.Process & { isMainFrame?: boolean }
+
+if (process.versions.electron !== undefined && canExposePreloadApi(electronProcess.isMainFrame === true, globalThis.location?.href)) {
   const electron = await import('electron')
   exposePreloadApi(electron.contextBridge, electron.ipcRenderer)
 }

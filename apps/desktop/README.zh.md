@@ -8,7 +8,7 @@
 
 Electron 以 `ELECTRON_RUN_AS_NODE=1` 启动自身可执行文件，并将已暂存的 DSH CLI 项作为 `dsh web --no-open --host 127.0.0.1 --port 3080 --patch <desktop patch>` 运行。
 
-后端只监听 `http://127.0.0.1:3080`；ready 监听器若其 lease token 未同时被 readiness 和 Desktop 状态路由接受，就是端口冲突，既不会被接管也不会被终止。
+Desktop 在 spawn 前探测回环 TCP。只有明确的连接拒绝表示端口空闲；已连接、HTTP、非 HTTP 或其他错误结果都表示端口被占用。被占用的监听器只有在 readiness、保留的 lease、已认证 identity 路由和实时进程 creation FILETIME 全部匹配时才会重新连接。其他被占用监听器都是端口冲突，既不会被接管也不会被终止。
 
 一个 Electron 实例持有单实例锁。后续启动会恢复并聚焦现有窗口，不会启动另一后端。
 
@@ -16,15 +16,15 @@ Electron 以 `ELECTRON_RUN_AS_NODE=1` 启动自身可执行文件，并将已暂
 
 可变数据位于 `%LOCALAPPDATA%\DSH Desktop`：DSH home、`.env`、会话、设置、有界日志和后端 lease。
 
-Desktop 创建可变子项前会创建此根目录，并将其 Windows ACL 限制为已验证的当前 `DOMAIN\user`；ACL 命令失败会停止启动。
+Desktop 创建可变子项前会创建此根目录，拒绝现有树中的任何 reparse point，并将根目录及每个现有子项的 DACL 重置为当前 Windows SID。固定的非交互 PowerShell 程序只通过进程环境接收根目录；DACL 失败会停止启动。
 
-lease 只记录已认证子进程 PID 和控制 token。Electron 不会将 token 放入 CLI 参数、日志、lease 诊断、preload 或 renderer IPC。它只会强制终止其保留或新 token 已认证 Desktop 控制路由的 PID。
+lease 记录已认证子进程 PID、apply 生命周期 nonce、Windows creation FILETIME 和 control token。Electron 不会将 nonce 或 token 放入 CLI 参数、日志、诊断、preload 或 renderer IPC。新子进程必须先通过 identity 路由报告其已 spawn 的 PID，才会写入 lease。重新连接和强制终止都会重新验证精确的已认证 identity 与当前 FILETIME；仅直接 spawn 永远不能授权之后的强制终止。
 
 ## Window and lifecycle
 
-唯一的 BrowserWindow 启用 `contextIsolation` 并禁用 Node integration。它只加载回环 origin，拒绝外部窗口，并通过 preload IPC 仅暴露冻结的 `backend.status`、`backend.restart` 和 `desktop.requestClose` 操作。
+唯一的 BrowserWindow 启用 `contextIsolation` 和 web security，禁用 Node integration 与 webview，只加载回环 origin，并拒绝外部窗口及非回环主 frame 或子 frame 导航。只有 Electron 在 Desktop-origin 主 frame 中运行时，preload 才会暴露冻结的 `backend.status`、`backend.restart` 和 `desktop.requestClose` 操作。IPC 要求同一 WebContents、同一主 frame 和精确的回环 origin。
 
-空闲关闭请求后端优雅停止。活跃工作显示 `Wait` 和 `Close anyway`；后者等待已配置宽限期后，只强制终止已拥有的子进程树。意外子进程退出保留窗口并报告 `dsh:unavailable`，使 renderer 可以请求重启。
+main process 会在后端启动前创建并加固唯一窗口，因此早期 second-instance 请求会排队以便稍后聚焦。后端 start、restart 和 stop 转换会串行化。空闲关闭请求后端优雅停止。活跃工作显示 `Wait` 和 `Close anyway`；后者等待已配置宽限期后，只会强制终止经过完整重新验证的已拥有 identity。已删减的启动失败以及直接或重新连接的后端失败使用原生 Retry/Quit 或 Restart backend/Quit 对话框；只有恢复成功后才加载回环地址。
 
 ## Limitations
 

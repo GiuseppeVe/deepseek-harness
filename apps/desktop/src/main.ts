@@ -1,23 +1,26 @@
 /** Electron main-process lifecycle for one loopback DSH backend. */
 
 import { fileURLToPath } from 'node:url'
-import { DESKTOP_ORIGIN, type BackendReady, type BackendStatus } from './backend.ts'
-import { DshBackend, createControlToken, createNodeBackendAdapter } from './backend.ts'
+import { DESKTOP_ORIGIN, type BackendReady, type BackendStatus, DshBackend, createControlToken, createNodeBackendAdapter } from './backend.ts'
 import { registerDesktopIpc } from './ipc.ts'
 import { createLeaseStore, nodeLeaseFileAdapter } from './lease.ts'
 import { createNodeWindowsDesktopPathAdapter, prepareDesktopPaths, resolveDesktopPaths } from './paths.ts'
 
 /** User decision for an active-work close confirmation. */
 export type CloseDecision = 'wait' | 'close'
+/** Native recovery state reported without backend diagnostic content. */
+export type RecoveryKind = 'startup' | 'unavailable'
+/** Native recovery decision after a backend failure. */
+export type RecoveryDecision = 'retry' | 'quit'
 
 /** BrowserWindow webContents operations DSH Desktop needs. */
 export interface DesktopWebContents {
-  /** Notify renderer about one backend lifecycle change. */
-  send(channel: 'dsh:unavailable'): void
+  /** Electron's sole top-level frame used to validate IPC. */
+  mainFrame: unknown
   /** Deny every attempted secondary window. */
   setWindowOpenHandler(listener: (details: unknown) => { action: 'deny' }): void
-  /** Observe navigation attempts before the renderer leaves loopback. */
-  on(event: 'will-navigate', listener: (event: { preventDefault(): void }, url: string) => void): void
+  /** Observe every main or subframe navigation attempt. */
+  on(event: 'will-navigate' | 'will-frame-navigate', listener: (event: { preventDefault(): void }, url: string) => void): void
 }
 
 /** Electron BrowserWindow capabilities used by Desktop main. */
@@ -60,7 +63,7 @@ export interface DesktopMainBackend {
   restart(): Promise<BackendReady>
   /** Query authenticated backend work state. */
   status(): Promise<BackendStatus>
-  /** Subscribe to unexpected child exit. */
+  /** Subscribe to unexpected direct-child or reattached-identity failure. */
   onUnexpectedExit(listener: (code: number | null) => void): () => void
 }
 
@@ -69,20 +72,28 @@ export interface DesktopMainOptions {
   /** Electron application lifecycle operations. */
   app: DesktopApp
   /** Construct the sole hardened Electron window. */
-  createWindow(options: { webPreferences: { contextIsolation: true; nodeIntegration: false; preload: string } }): DesktopWindow
+  createWindow(options: { webPreferences: {
+    contextIsolation: true
+    nodeIntegration: false
+    webSecurity: true
+    webviewTag: false
+    preload: string
+  } }): DesktopWindow
   /** One backend supervisor owned by this Electron process. */
   backend: DesktopMainBackend
   /** Prompt only when status reports active work. */
   confirmClose(): Promise<CloseDecision>
+  /** Show a native Retry/Quit or Restart backend/Quit decision without diagnostics. */
+  showRecovery(kind: RecoveryKind): Promise<RecoveryDecision>
   /** Fixed packaged preload module path. */
   preloadPath: string
-  /** Receive the sole window after its hardening has been installed. */
+  /** Receive the sole window after hardening and before backend startup. */
   onWindowCreated?(window: DesktopWindow): void
 }
 
 /** Start controller returned for Electron bootstrap and focused tests. */
 export interface DesktopMainController {
-  /** Claim the instance lock, boot DSH, and create the hardened window. */
+  /** Claim the instance lock, build the hardened window, then boot DSH. */
   start(): Promise<void>
   /** Coordinate a close requested through renderer IPC. */
   requestClose(): Promise<boolean>
@@ -98,36 +109,56 @@ export async function requestWindowClose(
   return true
 }
 
+/** Check one navigation URL against Desktop's fixed loopback origin. */
+function isDesktopOrigin(url: string): boolean {
+  try {
+    return new URL(url).origin === DESKTOP_ORIGIN
+  } catch {
+    return false
+  }
+}
+
 /** Create a single-window Desktop lifecycle controller without importing Electron in tests. */
 export function createDesktopMain(options: DesktopMainOptions): DesktopMainController {
   let window: DesktopWindow | undefined
   let closing = false
+  let pendingFocus = false
+  let startPromise: Promise<void> | undefined
+  let recoveryQueued = false
+  let lifecycle: Promise<void> = Promise.resolve()
+
+  const serialize = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const run = lifecycle.then(operation, operation)
+    lifecycle = run.then(() => undefined, () => undefined)
+    return await run
+  }
 
   const focusWindow = (): void => {
     const existing = window
-    if (existing === undefined) return
+    if (existing === undefined) {
+      pendingFocus = true
+      return
+    }
     if (existing.isMinimized()) existing.restore()
     existing.focus()
   }
 
-  const closeWindow = async (): Promise<boolean> => {
+  const closeWindow = async (): Promise<boolean> => await serialize(async () => {
     const allowed = await requestWindowClose(options.backend, options.confirmClose)
     if (allowed) {
       closing = true
       window?.close()
     }
     return allowed
-  }
+  })
 
   const hardenWindow = (created: DesktopWindow): void => {
     created.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    created.webContents.on('will-navigate', (event, url) => {
-      try {
-        if (new URL(url).origin !== DESKTOP_ORIGIN) event.preventDefault()
-      } catch {
-        event.preventDefault()
-      }
-    })
+    const denyNonDesktopNavigation = (event: { preventDefault(): void }, url: string): void => {
+      if (!isDesktopOrigin(url)) event.preventDefault()
+    }
+    created.webContents.on('will-navigate', denyNonDesktopNavigation)
+    created.webContents.on('will-frame-navigate', denyNonDesktopNavigation)
     created.on('close', (event) => {
       if (closing) return
       event.preventDefault()
@@ -135,30 +166,66 @@ export function createDesktopMain(options: DesktopMainOptions): DesktopMainContr
     })
   }
 
-  return {
-    async start(): Promise<void> {
+  const loadWithRecovery = async (kind: RecoveryKind, restart: boolean): Promise<void> => {
+    while (true) {
+      try {
+        const ready = restart ? await options.backend.restart() : await options.backend.start()
+        await window?.loadURL(ready.origin)
+        return
+      } catch {
+        if (await options.showRecovery(kind) === 'quit') {
+          options.app.quit()
+          return
+        }
+      }
+    }
+  }
+
+  const recoverUnexpectedBackend = (): void => {
+    if (recoveryQueued || closing) return
+    recoveryQueued = true
+    void serialize(async () => {
+      try {
+        if (await options.showRecovery('unavailable') === 'quit') {
+          options.app.quit()
+          return
+        }
+        await loadWithRecovery('unavailable', true)
+      } finally {
+        recoveryQueued = false
+      }
+    })
+  }
+
+  const start = async (): Promise<void> => {
+    if (startPromise !== undefined) return await startPromise
+    startPromise = serialize(async () => {
       if (!options.app.requestSingleInstanceLock()) {
         options.app.quit()
         return
       }
       options.app.on('second-instance', focusWindow)
       await options.app.whenReady()
-      const ready = await options.backend.start()
       const created = options.createWindow({
         webPreferences: {
           contextIsolation: true,
           nodeIntegration: false,
+          webSecurity: true,
+          webviewTag: false,
           preload: options.preloadPath,
         },
       })
       window = created
       hardenWindow(created)
       options.onWindowCreated?.(created)
-      options.backend.onUnexpectedExit(() => { window?.webContents.send('dsh:unavailable') })
-      await created.loadURL(ready.origin)
-    },
-    requestClose: closeWindow,
+      options.backend.onUnexpectedExit(recoverUnexpectedBackend)
+      if (pendingFocus) focusWindow()
+      await loadWithRecovery('startup', false)
+    })
+    return await startPromise
   }
+
+  return { start, requestClose: closeWindow }
 }
 
 /** Start the Windows Electron entry using only its packaged executable and runtime files. */
@@ -179,6 +246,7 @@ export async function startElectronDesktop(): Promise<void> {
       patchPath: fileURLToPath(new URL('../runtime/desktop.cordis.patch.yml', import.meta.url)),
       startTimeoutMs: 30_000,
       stopDeadlineMs: 5_000,
+      reattachMonitorMs: 2_000,
     },
     adapter: createNodeBackendAdapter(),
   })
@@ -199,14 +267,21 @@ export async function startElectronDesktop(): Promise<void> {
       cancelId: 0,
       message: 'DSH is processing work.',
     })).response === 0 ? 'wait' : 'close',
+    showRecovery: async kind => (await electron.dialog.showMessageBox({
+      type: 'error',
+      buttons: kind === 'startup' ? ['Retry', 'Quit'] : ['Restart backend', 'Quit'],
+      defaultId: 0,
+      cancelId: 1,
+      message: kind === 'startup' ? 'DSH backend did not start.' : 'DSH backend is unavailable.',
+    })).response === 0 ? 'retry' : 'quit',
     preloadPath: fileURLToPath(new URL('./preload.js', import.meta.url)),
     onWindowCreated: (window) => {
       mainWindow = window
       registerDesktopIpc({
         handle: (channel, listener) => {
-          electron.ipcMain.handle(channel, async event => await listener({ sender: event.sender }))
+          electron.ipcMain.handle(channel, async event => await listener({ sender: event.sender, senderFrame: event.senderFrame }))
         },
-      }, () => mainWindow?.webContents, backend, controller.requestClose)
+      }, () => mainWindow?.webContents, () => mainWindow?.webContents.mainFrame, backend, controller.requestClose)
     },
   })
   await controller.start()
