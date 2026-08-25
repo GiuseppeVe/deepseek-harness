@@ -1,0 +1,48 @@
+name: Build imported Tauri desktop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-bundle:
+    name: Windows Tauri bundle
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout imported application
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/upstream/desktop/pnpm-lock.yaml
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop/upstream/desktop
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Windows bundle
+        working-directory: apps/desktop/upstream/desktop
+        shell: pwsh
+        run: pnpm run build
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-tauriapp-windows
+          path: apps/desktop/upstream/desktop/src-tauri/target/release/bundle
+          if-no-files-found: error
