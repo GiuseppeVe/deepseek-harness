@@ -2,6 +2,9 @@ name: Build imported Tauri desktop
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/tauri-desktop-host
 
 permissions:
   contents: read
