@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
-import type { EntryOptions, PatchOptions } from '@deepseek-ai/cordis-plugin-loader'
+import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url))
 const DESKTOP_PATCH = join(REPO_ROOT, 'apps/desktop/runtime/desktop.cordis.patch.yml')
