@@ -1,8 +1,19 @@
+import { access } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
+const desktopDir = fileURLToPath(new URL('..', import.meta.url))
+const desktopBinary = join(
+  desktopDir,
+  'src-tauri',
+  'target',
+  'debug',
+  process.platform === 'win32' ? 'dsh-desktop.exe' : 'dsh-desktop',
+)
 
 interface DesktopPaths {
   dataDir: string
@@ -18,15 +29,14 @@ async function resolveDesktopPaths(input: {
   userHome: string
   sourceDshCli: string
 }): Promise<DesktopPaths> {
-  const { stdout } = await execFileAsync('cargo', [
-    'run',
-    '--quiet',
-    '--manifest-path',
-    'src-tauri/Cargo.toml',
-    '--',
+  await access(desktopBinary).catch(() => {
+    throw new Error(`Desktop adapter binary missing: ${desktopBinary}`)
+  })
+
+  const { stdout } = await execFileAsync(desktopBinary, [
     'resolve-desktop-paths',
     JSON.stringify(input),
-  ], { cwd: new URL('..', import.meta.url) })
+  ], { cwd: desktopDir })
   return JSON.parse(stdout) as DesktopPaths
 }
 
