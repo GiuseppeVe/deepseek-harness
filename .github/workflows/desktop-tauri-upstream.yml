@@ -73,7 +73,7 @@ jobs:
       - name: Install current branch dependencies
         working-directory: harness
         shell: pwsh
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm --dir apps/desktop install --ignore-workspace --frozen-lockfile
 
       - name: Run focused Rust private-state test
         working-directory: harness

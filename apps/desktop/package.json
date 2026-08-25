@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "cd ../.. && vitest run apps/desktop/tests/private-state.spec.ts"
+    "test": "vitest run --config vitest.config.ts tests/private-state.spec.ts"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
   }
 }
