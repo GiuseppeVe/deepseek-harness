@@ -36,7 +36,7 @@ jobs:
       - name: Install desktop dependencies
         working-directory: apps/desktop/upstream/desktop
         shell: pwsh
-        run: pnpm install --frozen-lockfile
+        run: pnpm --ignore-workspace install --frozen-lockfile
 
       - name: Build unsigned Windows bundle
         working-directory: apps/desktop/upstream/desktop
