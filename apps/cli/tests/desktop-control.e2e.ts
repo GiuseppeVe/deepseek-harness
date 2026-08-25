@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { boot, loadOptionalPatches, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
-import type { PatchOptions } from '@deepseek-ai/cordis-plugin-loader'
+import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import * as DesktopControl from '@deepseek-ai/dsh-host-desktop-control/src/index.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))

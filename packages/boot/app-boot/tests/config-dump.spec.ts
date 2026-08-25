@@ -201,7 +201,7 @@ describe('renderConfigDump', () => {
     const base = writeBase(dir)
     expect(() => renderConfigDump(NAME, base, [{
       label: 'invalid.yml',
-      patches: [{ upsert: [{ name: './missing-id.mjs' }] }],
+      patches: [{ upsert: [{ name: './missing-id.mjs' }] } as unknown as import('@deepseek-ai/cordis-plugin-include').PatchOptions],
     }], () => {})).toThrow('patch upsert row requires a nonempty id')
     expect(() => renderConfigDump(NAME, base, [{
       label: 'mixed.yml',
