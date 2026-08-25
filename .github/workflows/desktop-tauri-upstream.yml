@@ -63,10 +63,24 @@ jobs:
           }
           $bundleFiles | Get-FileHash -Algorithm SHA256 | Format-Table -AutoSize
 
-      - name: Upload unsigned assessment artifact
-        uses: actions/upload-artifact@v7
+      - name: Checkout current branch for focused desktop tests
+        uses: actions/checkout@v6
         with:
-          name: dsh-desktop-tauriapp-v0.6.4-unsigned
-          path: upstream/desktop/src-tauri/target/release/bundle
-          if-no-files-found: error
-          retention-days: 7
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Install current branch dependencies
+        working-directory: harness
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Run focused Rust private-state test
+        working-directory: harness
+        shell: pwsh
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
+
+      - name: Run focused TypeScript private-state test
+        working-directory: harness
+        shell: pwsh
+        run: pnpm --dir apps/desktop test -- private-state.spec.ts

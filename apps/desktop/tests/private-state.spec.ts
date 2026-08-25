@@ -9,6 +9,7 @@ interface DesktopPaths {
   dshHome: string
   logsDir: string
   runtimeDir: string
+  sourceDshCli: string
 }
 
 /** Calls Rust-only desktop path adapter used by this focused host test. */
@@ -36,7 +37,7 @@ describe('desktop private state', () => {
     const paths = await resolveDesktopPaths({
       appData: fixtureAppData,
       userHome: fixtureUserHome,
-      sourceDshCli: 'C:/fixture/dsh.ts',
+      sourceDshCli: 'C:/fixture/bin/../dsh.ts',
     })
 
     expect(paths.dataDir.startsWith(fixtureAppData)).toBe(true)
@@ -44,5 +45,6 @@ describe('desktop private state', () => {
     expect(paths.dshHome.startsWith(fixtureUserHome)).toBe(false)
     expect(paths.logsDir.startsWith(paths.dataDir)).toBe(true)
     expect(paths.runtimeDir.startsWith(paths.dataDir)).toBe(true)
+    expect(paths.sourceDshCli).toBe('C:\\fixture\\dsh.ts')
   })
 })
