@@ -83,4 +83,4 @@ jobs:
       - name: Run focused TypeScript private-state test
         working-directory: harness
         shell: pwsh
-        run: pnpm --dir apps/desktop test -- private-state.spec.ts
+        run: pnpm --dir apps/desktop --ignore-workspace test -- private-state.spec.ts
