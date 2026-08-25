@@ -60,7 +60,6 @@ export function applyEntryPatches(
   patches: PatchOptions[] | undefined,
   warn: (message: string, ...args: any[]) => void,
 ): EntryOptions[] {
-  validatePatches(patches)
   data = structuredClone(data)
   if (!patches?.length) return data
 
@@ -76,7 +75,7 @@ export function applyEntryPatches(
   buildMap(data)
 
   for (const patch of patches) {
-    const { id, insert, upsert, name, ...overrides } = patch
+    const { id, insert, name, ...overrides } = patch
 
     if (insert) {
       if (id) {
@@ -100,25 +99,6 @@ export function applyEntryPatches(
       // able to configure or disable a row an earlier layer inserted; without
       // this, inserted rows were silently unpatchable.
       buildMap(insert)
-      continue
-    }
-
-    if (upsert) {
-      for (const replacement of upsert) {
-        const index = data.findIndex(entry => entry.id === replacement.id)
-        const canonical = structuredClone(replacement)
-        if (index === -1) {
-          data.push(canonical)
-          continue
-        }
-        data = [
-          ...data.slice(0, index),
-          canonical,
-          ...data.slice(index).filter(entry => entry.id !== replacement.id),
-        ]
-      }
-      entryMap.clear()
-      buildMap(data)
       continue
     }
 
@@ -147,30 +127,6 @@ export function applyEntryPatches(
   return data
 }
 
-/** Validate operations that must fail before Include mutates its child tree. */
-function validatePatches(patches: PatchOptions[] | undefined): void {
-  for (const patch of patches ?? []) {
-    const hasInsert = Object.hasOwn(patch, 'insert')
-    const hasUpsert = Object.hasOwn(patch, 'upsert')
-    if (hasInsert && hasUpsert) throw new TypeError('patch cannot contain both insert and upsert')
-    if (!hasUpsert) continue
-    if (patch.id !== undefined) throw new TypeError('patch upsert is root-only')
-    const sibling = Object.keys(patch).find(key => key !== 'upsert' && key !== 'id')
-    if (sibling !== undefined) throw new TypeError(`patch upsert cannot contain ${sibling}`)
-    if (!Array.isArray(patch.upsert) || patch.upsert.length === 0) {
-      throw new TypeError('patch upsert requires at least one row')
-    }
-    const ids = new Set<string>()
-    for (const row of patch.upsert) {
-      if (typeof row?.id !== 'string' || row.id.trim() === '') {
-        throw new TypeError('patch upsert row requires a nonempty id')
-      }
-      if (ids.has(row.id)) throw new TypeError('patch upsert rows require distinct ids')
-      ids.add(row.id)
-    }
-  }
-}
-
 type ConfigUpdateStage = 'read' | 'parse' | 'validate'
 
 interface ReadCandidate {
@@ -189,8 +145,6 @@ class ConfigFileError extends Error {
 export interface PatchOptions {
   id?: string
   insert?: EntryOptions[]
-  /** Root entries to replace by id, or append when that root id is absent. */
-  upsert?: EntryOptions[]
   name?: string
   config?: any
   group?: boolean | null

@@ -1,0 +1,72 @@
+name: Validate Tauri desktop upstream
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tauri-desktop-upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows Tauri build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pinned upstream source
+        uses: actions/checkout@v6
+        with:
+          repository: hyperion2144/dsh-desktop-tauriapp
+          ref: 6c3ea8ae51efcaaf3fec50a5abb557d7d9246718
+          path: upstream
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: upstream/desktop/pnpm-lock.yaml
+
+      - name: Verify Rust toolchain
+        shell: pwsh
+        run: cargo --version
+
+      - name: Install pinned desktop dependencies
+        working-directory: upstream/desktop
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Tauri bundle
+        working-directory: upstream/desktop
+        shell: pwsh
+        run: pnpm run build
+
+      - name: Verify and hash bundle
+        working-directory: upstream/desktop
+        shell: pwsh
+        run: |
+          $bundleRoot = 'src-tauri/target/release/bundle'
+          if (-not (Test-Path -LiteralPath $bundleRoot)) {
+            throw "Tauri did not create $bundleRoot"
+          }
+          $bundleFiles = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File
+          if ($bundleFiles.Count -eq 0) {
+            throw "Tauri created no bundle files under $bundleRoot"
+          }
+          $bundleFiles | Get-FileHash -Algorithm SHA256 | Format-Table -AutoSize
+
+      - name: Upload unsigned assessment artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsh-desktop-tauriapp-v0.6.4-unsigned
+          path: upstream/desktop/src-tauri/target/release/bundle
+          if-no-files-found: error
+          retention-days: 7

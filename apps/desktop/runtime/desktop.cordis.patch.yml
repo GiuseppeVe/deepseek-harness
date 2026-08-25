@@ -1,12 +1,12 @@
 # Final Desktop layer. Passed as the last `dsh --patch` overlay, so each boot
-# and live user-layer recomposition reapplies these canonical loopback rows
-# after profile and home patches.
-- upsert:
-    - id: webserver
-      name: '@deepseek-ai/dsh-host-webserver'
-      config:
-        host: '127.0.0.1'
-        port: 3080
+# and live user-layer recomposition reapplies these loopback-only values after
+# profile and home patches.
+- id: webserver
+  config:
+    host: '127.0.0.1'
+    port: 3080
+
+- insert:
     - id: desktop-control
       name: '@deepseek-ai/dsh-host-desktop-control'
       config:
