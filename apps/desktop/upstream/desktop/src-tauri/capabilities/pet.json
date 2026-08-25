@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "桌宠窗口能力：拖拽 + 鼠标穿透开关",
+  "windows": ["pet"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-ignore-cursor-events",
+    "allow-pet-show-main",
+    "allow-pet-hide",
+    "allow-pet-quit",
+    "allow-pet-toggle-passthrough",
+    "allow-toggle-zoom"
+  ]
+}

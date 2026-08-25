@@ -1,0 +1,76 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DeepSeek Harness Desktop",
+  "version": "0.6.4",
+  "identifier": "com.arcreel.dsh-desktop-tauriapp",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 940,
+        "minHeight": 620,
+        "center": true,
+        "dragDropEnabled": false
+      },
+      {
+        "label": "pet",
+        "url": "pet.html",
+        "title": "DeepSeek Harness Desktop 桌宠",
+        "width": 260,
+        "height": 300,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focusable": false,
+        "focus": false,
+        "shadow": false,
+        "visible": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "DeepSeek Harness Desktop —— DeepSeek Harness 桌面客户端",
+    "longDescription": "一键启动 DeepSeek Harness Web GUI 的桌面壳：自动拉起本地服务、托盘常驻、退出自动清理。",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "embedded/dsh-desktop-tauriapp": "plugins/dsh-desktop-tauriapp/",
+      "embedded/dsh-mobile-access": "plugins/dsh-mobile-access/",
+      "embedded/dsh-mobile-nav": "plugins/dsh-mobile-nav/"
+    }
+  }
+}

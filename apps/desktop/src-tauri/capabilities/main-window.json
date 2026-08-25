@@ -1,7 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "main-window",
-  "description": "Loopback desktop shell exposes no Tauri APIs to frontend content.",
-  "windows": ["main"],
-  "permissions": []
-}
