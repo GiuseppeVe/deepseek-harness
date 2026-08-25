@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,23 +23,9 @@ where
         dsh_home: data_dir.join("dsh-home"),
         logs_dir: data_dir.join("logs"),
         runtime_dir: data_dir.join("runtime"),
-        source_dsh_cli: normalize_source_dsh_cli(source_dsh_cli),
+        source_dsh_cli: source_dsh_cli.to_path_buf(),
         data_dir,
     }
-}
-
-/// Removes lexical current and parent directory segments from DSH CLI path.
-fn normalize_source_dsh_cli(source_dsh_cli: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in source_dsh_cli.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir if !normalized.pop() => normalized.push(component.as_os_str()),
-            Component::ParentDir => {}
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    normalized
 }
 
 /// JSON input accepted only by focused test adapter.
@@ -77,13 +63,14 @@ mod tests {
     fn resolves_every_directory_under_private_app_data() {
         let app_data = PathBuf::from("C:/fixture/AppData/Local");
         let user_home = Path::new("C:/fixture/User");
-        let paths = resolve_desktop_paths(|| app_data.clone(), Path::new("C:/fixture/bin/../dsh.ts"));
+        let source_dsh_cli = Path::new("../../dsh.ts");
+        let paths = resolve_desktop_paths(|| app_data.clone(), source_dsh_cli);
 
         assert!(paths.data_dir.starts_with(&app_data));
         assert!(paths.dsh_home.starts_with(&app_data));
         assert!(!paths.dsh_home.starts_with(user_home));
         assert!(paths.logs_dir.starts_with(&paths.data_dir));
         assert!(paths.runtime_dir.starts_with(&paths.data_dir));
-        assert_eq!(paths.source_dsh_cli, PathBuf::from("C:/fixture/dsh.ts"));
+        assert_eq!(paths.source_dsh_cli, PathBuf::from(source_dsh_cli));
     }
 }

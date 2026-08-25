@@ -37,7 +37,7 @@ describe('desktop private state', () => {
     const paths = await resolveDesktopPaths({
       appData: fixtureAppData,
       userHome: fixtureUserHome,
-      sourceDshCli: 'C:/fixture/bin/../dsh.ts',
+      sourceDshCli: '../../dsh.ts',
     })
 
     expect(paths.dataDir.startsWith(fixtureAppData)).toBe(true)
@@ -45,6 +45,6 @@ describe('desktop private state', () => {
     expect(paths.dshHome.startsWith(fixtureUserHome)).toBe(false)
     expect(paths.logsDir.startsWith(paths.dataDir)).toBe(true)
     expect(paths.runtimeDir.startsWith(paths.dataDir)).toBe(true)
-    expect(paths.sourceDshCli).toBe('C:\\fixture\\dsh.ts')
+    expect(paths.sourceDshCli).toBe('../../dsh.ts')
   })
 })
